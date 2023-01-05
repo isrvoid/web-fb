@@ -4,6 +4,9 @@ let gl;
 let program;
 let locations;
 let isGlReady = false;
+// TODO get buffer size from wasm code
+const width = 800;
+const height = 480;
 
 function initModule(evt) {
     window.removeEventListener(evt.type, initModule, false);
@@ -76,7 +79,7 @@ function animate() {
     if (!isGlReady) return;
 
     webfb.testTransitionStep();
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 320, 240, gl.RGBA, gl.UNSIGNED_BYTE, frameBuffer);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, frameBuffer);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
     const fps = 20;
@@ -111,7 +114,7 @@ function initAttributes() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 320, 240, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     gl.uniform1i(locations.uSampler, 0);
 }
 
