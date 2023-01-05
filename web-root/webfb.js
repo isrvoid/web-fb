@@ -1,17 +1,24 @@
-window.addEventListener("load", initModule, false);
+const webfbBinding = {
+    env: {
+        print: (a) => { console.log(`result: ${a}`); }
+    }
+};
+
+const webfb = (await WebAssembly.instantiateStreaming(fetch("webfb.wasm"), webfbBinding)).instance.exports;
+webfb.init();
+
+const width = webfb.imageWidth();
+const height = webfb.imageHeight();
+const frameBuffer = new Uint8Array(webfb.memory.buffer, webfb.bufferOffset(), webfb.bufferSize());
+
+setCanvasSize(width, height);
 
 let gl;
 let program;
 let locations;
 let isGlReady = false;
-// TODO get buffer size from wasm code
-const width = 800;
-const height = 480;
 
-function initModule(evt) {
-    window.removeEventListener(evt.type, initModule, false);
-    const webfbFut = WebAssembly.instantiateStreaming(fetch("webfb.wasm"), webfbBinding);
-
+function main() {
     gl = getRenderingContext();
     if (!gl) {
         console.log(gl, "Failed to get WebGL context");
@@ -52,26 +59,9 @@ function initModule(evt) {
         textureCoord: gl.getAttribLocation(program, "aTextureCoord"),
         uSampler: gl.getUniformLocation(program, "uSampler"),
     };
-
     initAttributes();
     isGlReady = true;
 
-    webfbFut.then(initWebfbAndRun);
-}
-
-const webfbBinding = {
-    env: {
-        print: (a) => { console.log(`result: ${a}`); }
-    }
-};
-
-let webfb;
-let frameBuffer;
-
-function initWebfbAndRun(obj) {
-    webfb = obj.instance.exports;
-    webfb.init();
-    frameBuffer = new Uint8Array(webfb.memory.buffer, webfb.bufferOffset(), webfb.bufferSize());
     window.requestAnimationFrame(animate);
 }
 
@@ -137,6 +127,12 @@ function getRenderingContext() {
     return canvas.getContext("webgl", { alpha: false, depth: false, antialias: false, desynchronized: true });
 }
 
+function setCanvasSize(w, h) {
+    const canvas = document.getElementById("canvas");
+    canvas.width = w;
+    canvas.height = h;
+}
+
 const vsSource = `
     attribute vec2 aVertexPosition;
     attribute vec2 aTextureCoord;
@@ -157,3 +153,5 @@ const fsSource = `
         gl_FragColor = texture2D(uSampler, vTextureCoord);
     }
 `;
+
+main();
