@@ -125,11 +125,13 @@ fn waitForRequest(fd: socket_t, buf: []u8) ![]u8 {
 const Request = struct {
     method: std.http.Method,
     raw_target: []const u8,
+    is_upgrade_request: bool,
+    raw_websocket_key: ?[]const u8,
 };
 
 fn parseRequest(content: []const u8) ?Request {
-    const line_end_i = indexOfHeaderLineEnding(content) orelse return null;
-    const line = content[0..line_end_i];
+    var line_it = HeaderLineIterator{.request = content};
+    const line = line_it.next() orelse return null;
     const method_end_i = mem.indexOfScalar(u8, line, ' ') orelse return null;
     const target_end_i = mem.lastIndexOfScalar(u8, line, ' ').?;
     if (!mem.eql(u8, "HTTP/1.1", line[target_end_i + 1 ..])) return null;
@@ -141,17 +143,64 @@ fn parseRequest(content: []const u8) ?Request {
                 break :res @intToEnum(std.http.Method, field.value);
         return null;
     };
-    return .{ .method = method, .raw_target = line[method_end_i + 1 .. target_end_i] };
+    // TODO parse upgrade, key
+    return .{ .method = method, .raw_target = line[method_end_i + 1 .. target_end_i], .is_upgrade_request = false, .raw_websocket_key = null };
 }
 
-fn indexOfHeaderLineEnding(s: []const u8) ?usize {
-    var p = s.ptr;
-    const p_end = s.ptr + s.len - 1;
-    while (@ptrToInt(p) < @ptrToInt(p_end)) : (p += 1)
-        if (p[0] == '\r' and p[1] == '\n')
-            return @ptrToInt(p) - @ptrToInt(s.ptr);
+const HeaderLineIterator = struct {
+    request: []const u8,
+    last_end_i: usize = 0,
 
-    return null;
+    const Self = @This();
+
+    fn next(self: *Self) ?[]const u8 {
+        const tail = self.request[self.last_end_i..];
+        const ending_i = indexOfHeaderLineEnding(tail) orelse return null;
+        if (ending_i == 0) return null;
+        self.last_end_i += ending_i + 2;
+        return tail[0..ending_i];
+    }
+
+    fn indexOfHeaderLineEnding(s: []const u8) ?usize {
+        var p = s.ptr;
+        const p_end = s.ptr + s.len - 1;
+        while (@ptrToInt(p) < @ptrToInt(p_end)) : (p += 1)
+            if (p[0] == '\r' and p[1] == '\n')
+                return @ptrToInt(p) - @ptrToInt(s.ptr);
+
+        return null;
+    }
+};
+
+test "header line iterator" {
+    const expect = std.testing.expect;
+    const expectEqs = std.testing.expectEqualStrings;
+    var it: HeaderLineIterator = undefined;
+    // invalid
+    it = HeaderLineIterator{.request = ""};
+    try expect(null == it.next());
+    it = HeaderLineIterator{.request = "\n"};
+    try expect(null == it.next());
+    it = HeaderLineIterator{.request = "foo"};
+    try expect(null == it.next());
+    // valid
+    it = HeaderLineIterator{.request = "foo\r\n"};
+    try expectEqs("foo", it.next().?);
+    it = HeaderLineIterator{.request = "a\r\nBar: x\r\n"};
+    try expectEqs("a", it.next().?);
+    try expectEqs("Bar: x", it.next().?);
+    // invalid end
+    it = HeaderLineIterator{.request = "foo\r\n"};
+    _ = it.next();
+    try expect(null == it.next());
+    // single end
+    it = HeaderLineIterator{.request = "\r\n"};
+    try expect(null == it.next());
+    // header end
+    it = HeaderLineIterator{.request = "Foo:\r\n\r\n"};
+    _ = it.next();
+    try expect(null == it.next());
+    try expect(null == it.next());
 }
 
 fn sendErrorResponse(fd: socket_t, comptime status: std.http.Status) !void {
