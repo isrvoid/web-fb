@@ -130,21 +130,65 @@ const Request = struct {
 };
 
 fn parseRequest(content: []const u8) ?Request {
+    var result: Request = undefined;
     var line_it = HeaderLineIterator{.request = content};
-    const line = line_it.next() orelse return null;
-    const method_end_i = mem.indexOfScalar(u8, line, ' ') orelse return null;
-    const target_end_i = mem.lastIndexOfScalar(u8, line, ' ').?;
-    if (!mem.eql(u8, "HTTP/1.1", line[target_end_i + 1 ..])) return null;
+    const request_line = line_it.next() orelse return null;
+    if (!parseRequestLine(request_line, &result)) return null;
+    if (!parseUpgradeFields(line_it, &result)) return null;
+    return result;
+}
 
-    const method = res: {
+fn parseRequestLine(line: []const u8, result_out: *Request) bool {
+    const method_end_i = mem.indexOfScalar(u8, line, ' ') orelse return false;
+    const target_end_i = mem.lastIndexOfScalar(u8, line, ' ').?;
+    if (!mem.eql(u8, "HTTP/1.1", line[target_end_i + 1 ..])) return false;
+
+    result_out.method = res: {
         const token = line[0..method_end_i];
         inline for (@typeInfo(std.http.Method).Enum.fields) |field|
             if (mem.eql(u8, token, field.name))
                 break :res @intToEnum(std.http.Method, field.value);
-        return null;
+        return false;
     };
-    // TODO parse upgrade, key
-    return .{ .method = method, .raw_target = line[method_end_i + 1 .. target_end_i], .is_upgrade_request = false, .raw_websocket_key = null };
+    result_out.raw_target = line[method_end_i + 1 .. target_end_i];
+    return true;
+}
+
+fn parseUpgradeFields(fields_start: HeaderLineIterator, result_out: *Request) bool {
+    result_out.is_upgrade_request = false;
+    result_out.raw_websocket_key = null;
+    var it = fields_start;
+    var line_ = it.next();
+    while (line_ != null) : (line_ = it.next()) {
+        const line = line_.?;
+        if (isUpgradeField(line))
+            result_out.is_upgrade_request = true;
+
+        var key: []const u8 = undefined;
+        if (isWebsocketKeyField(line, &key))
+            result_out.raw_websocket_key = key;
+    }
+    return result_out.is_upgrade_request == (result_out.raw_websocket_key != null);
+}
+
+fn isUpgradeField(line: []const u8) bool {
+    const name = "upgrade:";
+    const val = "websocket";
+    const min_len = name.len + val.len;
+    if (line.len < min_len) return false;
+    if (!std.ascii.eqlIgnoreCase(name, line[0..name.len])) return false;
+    return mem.eql(u8, val, mem.trim(u8, line[name.len..], &std.ascii.whitespace));
+}
+
+fn isWebsocketKeyField(line: []const u8, key_out: *[]const u8) bool {
+    const name = "sec-websocket-key:";
+    const min_len = name.len + 24;
+    if (line.len < min_len) return false;
+    if (!std.ascii.eqlIgnoreCase(name, line[0..name.len])) return false;
+    const val = mem.trim(u8, line[name.len..], &std.ascii.whitespace);
+    if (!(val.len == 24 and val[22] == '=' and val[23] == '=')) return false;
+    key_out.* = val;
+    return true;
 }
 
 const HeaderLineIterator = struct {
