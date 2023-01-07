@@ -80,7 +80,12 @@ pub fn main() !void {
                 break :res request_.?;
             };
             switch (request.method) {
-                .GET => try handleGetRequest(cfd, request),
+                .GET => {
+                    if (request.is_upgrade_request) {
+                        try handleUpgradeRequest(cfd, request);
+                    } else
+                        try handleGetFileRequest(cfd, request);
+                },
                 else => try sendErrorResponse(cfd, .not_implemented),
             }
         }
@@ -88,14 +93,22 @@ pub fn main() !void {
     }
 }
 
-fn handleGetRequest(cfd: socket_t, request: Request) !void {
+fn handleGetFileRequest(cfd: socket_t, request: Request) !void {
+    const close_after = ".wasm"; // last file before expected upgrade request
     var path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     const is_default_target = request.raw_target.len == 1 and request.raw_target[0] == '/';
     const path_ = sanitizedPath(if (is_default_target) "/index.html" else request.raw_target, &path_buf);
-    if (path_) |path|
-        try sendFileResponse(cfd, path, false)
-    else
+    if (path_) |path| {
+        const should_close = mem.endsWith(u8, path, close_after);
+        try sendFileResponse(cfd, path, should_close);
+    } else
         try sendErrorResponse(cfd, .not_found);
+}
+
+fn handleUpgradeRequest(cfd: socket_t, request: Request) !void {
+    // FIXME
+    _ = cfd;
+    _ = request;
 }
 
 fn initSocket(port: u16) !socket_t {
