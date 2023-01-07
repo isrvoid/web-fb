@@ -63,8 +63,7 @@ pub fn main() !void {
     defer os.closeSocket(sfd);
     try debug_log.init("/tmp/requestLog.txt");
     defer debug_log.deinit();
-    var request_buf: [512]u8 = undefined;
-    var path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var request_buf: [1024]u8 = undefined;
     while (true) {
         const cfd = try waitForConnection(sfd);
         debug_log.logClientConnected();
@@ -81,19 +80,22 @@ pub fn main() !void {
                 break :res request_.?;
             };
             switch (request.method) {
-                .GET => {
-                    const is_default_target = request.raw_target.len == 1 and request.raw_target[0] == '/';
-                    const path_ = sanitizedPath(if (is_default_target) "/index.html" else request.raw_target, &path_buf);
-                    if (path_) |path|
-                        try sendFileResponse(cfd, path)
-                    else
-                        try sendErrorResponse(cfd, .not_found);
-                },
+                .GET => try handleGetRequest(cfd, request),
                 else => try sendErrorResponse(cfd, .not_implemented),
             }
         }
         std.log.info("client disconnected", .{});
     }
+}
+
+fn handleGetRequest(cfd: socket_t, request: Request) !void {
+    var path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    const is_default_target = request.raw_target.len == 1 and request.raw_target[0] == '/';
+    const path_ = sanitizedPath(if (is_default_target) "/index.html" else request.raw_target, &path_buf);
+    if (path_) |path|
+        try sendFileResponse(cfd, path, false)
+    else
+        try sendErrorResponse(cfd, .not_found);
 }
 
 fn initSocket(port: u16) !socket_t {
@@ -173,10 +175,10 @@ inline fn statusString(comptime status: std.http.Status) [:0]const u8 {
 
 fn writeErrorResponse(comptime se: std.http.Status, buf: []u8) []u8 {
     const status = statusString(se);
-    const header_fmt = "HTTP/1.1 " ++ status ++ "\r\n" ++ "Content-Type: text/html\r\n"
-        ++ "Content-Length: {d}\r\n" ++ "\r\n";
-    const body = "<html>\n<head><title>" ++ status ++ "</title></head>\n" ++ "<body>\n<h1>"
-        ++ status ++ "</h1>\n<hr/>\n</body>\n</html>\n";
+    const header_fmt = "HTTP/1.1 " ++ status ++ "\r\nContent-Type: text/html\r\nConnection: close\r\n"
+        ++ "Content-Length: {d}\r\n\r\n";
+    const body = "<html>\n<head><title>" ++ status ++ "</title></head>\n"
+        ++ "<body>\n<h1>" ++ status ++ "</h1>\n<hr/>\n</body>\n</html>\n";
     var stream = std.io.fixedBufferStream(buf);
     var writer = stream.writer();
     std.fmt.format(writer, header_fmt, .{body.len}) catch unreachable;
@@ -184,12 +186,12 @@ fn writeErrorResponse(comptime se: std.http.Status, buf: []u8) []u8 {
     return stream.getWritten();
 }
 
-fn sendFileResponse(socket: socket_t, path: []const u8) !void {
+fn sendFileResponse(socket: socket_t, path: []const u8, close_connection: bool) !void {
     const file = try std.fs.openFileAbsolute(path, .{});
     defer file.close();
     const content_len: usize = try file.getEndPos();
     var header_buf: [256]u8 = undefined;
-    const header = writeHeader(content_len, contentType(path), &header_buf);
+    const header = writeHeader(content_len, contentType(path), close_connection, &header_buf);
     var n = try os.send(socket, header, 0);
     if (n != header.len) return error.SendTruncated;
     try sendFile(socket, file, content_len);
@@ -227,9 +229,8 @@ fn sendFile(socket: socket_t, file: std.fs.File, len: usize) !void {
     }
 }
 
-fn writeHeader(content_len: usize, content_type: ContentType, buf: []u8) []u8 {
-    const fmt = "HTTP/1.1 " ++ statusString(.ok) ++ "\r\nContent-Type: {s}\r\n"
-        ++ "Keep-Alive: timeout=120, max=1000\r\nConnection: keep-alive\r\n"
+fn writeHeader(content_len: usize, content_type: ContentType, close_connection: bool, buf: []u8) []u8 {
+    const fmt = "HTTP/1.1 " ++ statusString(.ok) ++ "\r\nContent-Type: {s}\r\nConnection: {s}\r\n"
         ++ "Content-Length: {d}\r\n\r\n";
     const sType = switch (content_type) {
         .html => "text/html",
@@ -238,8 +239,9 @@ fn writeHeader(content_len: usize, content_type: ContentType, buf: []u8) []u8 {
         .text => "text/plain",
         .binary => "application/octet-stream",
     };
+    const sConn = if (close_connection) "close" else "keep-alive\r\nKeep-Alive: timeout=5";
     var stream = std.io.fixedBufferStream(buf);
-    std.fmt.format(stream.writer(), fmt, .{ sType, content_len }) catch unreachable;
+    std.fmt.format(stream.writer(), fmt, .{ sType, sConn, content_len }) catch unreachable;
     return stream.getWritten();
 }
 
