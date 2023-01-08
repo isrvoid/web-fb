@@ -63,7 +63,7 @@ pub fn main() !void {
     defer os.closeSocket(sfd);
     try debug_log.init("/tmp/requestLog.txt");
     defer debug_log.deinit();
-    var request_buf: [1024]u8 = undefined;
+    var request_buf: [0x400]u8 = undefined;
     while (true) {
         const cfd = try waitForConnection(sfd);
         debug_log.logClientConnected();
@@ -82,7 +82,7 @@ pub fn main() !void {
             switch (request.method) {
                 .GET => {
                     if (request.is_upgrade_request) {
-                        try handleUpgradeRequest(cfd, request);
+                        try handleUpgradeRequest(cfd, request.raw_websocket_key.?);
                     } else
                         try handleGetFileRequest(cfd, request);
                 },
@@ -105,10 +105,39 @@ fn handleGetFileRequest(cfd: socket_t, request: Request) !void {
         try sendErrorResponse(cfd, .not_found);
 }
 
-fn handleUpgradeRequest(cfd: socket_t, request: Request) !void {
-    // FIXME
-    _ = cfd;
-    _ = request;
+fn handleUpgradeRequest(cfd: socket_t, raw_key: []const u8) !void {
+    const fixed_append = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    if (!isValidKey(raw_key))
+        try sendErrorResponse(cfd, .bad_request);
+
+    var sha = std.crypto.hash.Sha1.init(.{});
+    sha.update(raw_key);
+    sha.update(fixed_append);
+    var hash: [20]u8 = undefined;
+    sha.final(&hash);
+    var hash64: [28]u8 = undefined;
+    const encoder = std.base64.standard.Encoder;
+    try sendUpgradeResponse(cfd, encoder.encode(&hash64, &hash));
+}
+
+fn isValidKey(raw: []const u8) bool {
+    std.debug.assert(raw.len == 24 and raw[22] == '=' and raw[23] == '='); // checked when parsing
+    const decoder = std.base64.standard.Decoder;
+    const len = decoder.calcSizeForSlice(raw) catch return false;
+    if (len != 16) return false;
+    var buf: [16]u8 = undefined;
+    decoder.decode(&buf, raw) catch return false;
+    return true;
+}
+
+fn sendUpgradeResponse(fd: socket_t, hash_str: []const u8) !void {
+    var buf: [0x100]u8 = undefined;
+    const fmt = "HTTP/1.1 " ++ statusString(.switching_protocols)
+        ++ "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n";
+    const s = std.fmt.bufPrint(&buf, fmt, .{hash_str}) catch unreachable;
+    const n = try os.send(fd, s, 0);
+    if (n != s.len) return error.SendTruncated;
+    debug_log.logSend(s);
 }
 
 fn initSocket(port: u16) !socket_t {
@@ -261,7 +290,7 @@ test "header line iterator" {
 }
 
 fn sendErrorResponse(fd: socket_t, comptime status: std.http.Status) !void {
-    var buf: [256]u8 = undefined;
+    var buf: [0x100]u8 = undefined;
     const s = writeErrorResponse(status, &buf);
     const n = try os.send(fd, s, 0);
     if (n != s.len) return error.SendTruncated;
@@ -279,8 +308,8 @@ inline fn statusString(comptime status: std.http.Status) [:0]const u8 {
     comptime return std.fmt.comptimePrint("{d} {s}", .{ @enumToInt(status), status.phrase().? })[0..];
 }
 
-fn writeErrorResponse(comptime se: std.http.Status, buf: []u8) []u8 {
-    const status = statusString(se);
+fn writeErrorResponse(comptime stat: std.http.Status, buf: []u8) []u8 {
+    const status = statusString(stat);
     const header_fmt = "HTTP/1.1 " ++ status ++ "\r\nContent-Type: text/html\r\nConnection: close\r\n"
         ++ "Content-Length: {d}\r\n\r\n";
     const body = "<html>\n<head><title>" ++ status ++ "</title></head>\n"
@@ -296,7 +325,7 @@ fn sendFileResponse(socket: socket_t, path: []const u8, close_connection: bool) 
     const file = try std.fs.openFileAbsolute(path, .{});
     defer file.close();
     const content_len: usize = try file.getEndPos();
-    var header_buf: [256]u8 = undefined;
+    var header_buf: [0x100]u8 = undefined;
     const header = writeHeader(content_len, contentType(path), close_connection, &header_buf);
     var n = try os.send(socket, header, 0);
     if (n != header.len) return error.SendTruncated;
