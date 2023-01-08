@@ -107,9 +107,6 @@ fn handleGetFileRequest(cfd: socket_t, request: Request) !void {
 
 fn handleUpgradeRequest(cfd: socket_t, raw_key: []const u8) !void {
     const fixed_append = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    if (!isValidKey(raw_key))
-        try sendErrorResponse(cfd, .bad_request);
-
     var sha = std.crypto.hash.Sha1.init(.{});
     sha.update(raw_key);
     sha.update(fixed_append);
@@ -118,16 +115,6 @@ fn handleUpgradeRequest(cfd: socket_t, raw_key: []const u8) !void {
     var hash64: [28]u8 = undefined;
     const encoder = std.base64.standard.Encoder;
     try sendUpgradeResponse(cfd, encoder.encode(&hash64, &hash));
-}
-
-fn isValidKey(raw: []const u8) bool {
-    std.debug.assert(raw.len == 24 and raw[22] == '=' and raw[23] == '='); // checked when parsing
-    const decoder = std.base64.standard.Decoder;
-    const len = decoder.calcSizeForSlice(raw) catch return false;
-    if (len != 16) return false;
-    var buf: [16]u8 = undefined;
-    decoder.decode(&buf, raw) catch return false;
-    return true;
 }
 
 fn sendUpgradeResponse(fd: socket_t, hash_str: []const u8) !void {
@@ -224,13 +211,13 @@ fn isUpgradeField(line: []const u8) bool {
 
 fn isWebsocketKeyField(line: []const u8, key_out: *[]const u8) bool {
     const name = "sec-websocket-key:";
-    const min_len = name.len + 24;
+    const min_len = name.len + 1;
     if (line.len < min_len) return false;
+    if (std.ascii.toLower(line[16]) != 'y') return false; // discard same prefix quicker
     if (!std.ascii.eqlIgnoreCase(name, line[0..name.len])) return false;
     const val = mem.trim(u8, line[name.len..], &std.ascii.whitespace);
-    if (!(val.len == 24 and val[22] == '=' and val[23] == '=')) return false;
     key_out.* = val;
-    return true;
+    return val.len > 0;
 }
 
 const HeaderLineIterator = struct {
