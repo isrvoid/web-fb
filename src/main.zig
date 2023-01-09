@@ -64,13 +64,13 @@ pub fn main() !void {
     try debug_log.init("/tmp/requestLog.txt");
     defer debug_log.deinit();
     var request_buf: [0x400]u8 = undefined;
-    while (true) {
+    outer: while (true) {
         const cfd = try waitForConnection(sfd);
         debug_log.logClientConnected();
         while (true) {
             const raw_request = try waitForRequest(cfd, &request_buf);
             debug_log.logRecv(if (raw_request.len > 0) raw_request else "end-of-file (0 length)\n");
-            if (raw_request.len == 0) break; // end-of-file (peer orderly shutdown)
+            if (raw_request.len == 0) continue :outer; // end-of-file (peer orderly shutdown)
             const request = res: {
                 const request_ = parseRequest(raw_request);
                 if (request_ == null) {
@@ -82,30 +82,39 @@ pub fn main() !void {
             switch (request.method) {
                 .GET => {
                     if (request.is_upgrade_request) {
-                        try handleUpgradeRequest(cfd, request.raw_websocket_key.?);
+                        if (try handleUpgradeRequest(cfd, request.raw_websocket_key.?)) break;
                     } else
                         try handleGetFileRequest(cfd, request);
                 },
                 else => try sendErrorResponse(cfd, .not_implemented),
             }
         }
-        std.log.info("client disconnected", .{});
+        try serveWs(cfd, &request_buf);
+        os.closeSocket(cfd);
     }
 }
 
-fn handleGetFileRequest(cfd: socket_t, request: Request) !void {
+fn serveWs(socket: socket_t, buf: []u8) !void {
+    while (true) {
+        // FIXME implement
+        const n = try os.recv(socket, buf, 0);
+        if (n == 0 or n == 8) break;
+    }
+}
+
+fn handleGetFileRequest(socket: socket_t, request: Request) !void {
     const close_after = ".wasm"; // last file before expected upgrade request
     var path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     const is_default_target = request.raw_target.len == 1 and request.raw_target[0] == '/';
     const path_ = sanitizedPath(if (is_default_target) "/index.html" else request.raw_target, &path_buf);
     if (path_) |path| {
         const should_close = mem.endsWith(u8, path, close_after);
-        try sendFileResponse(cfd, path, should_close);
+        try sendFileResponse(socket, path, should_close);
     } else
-        try sendErrorResponse(cfd, .not_found);
+        try sendErrorResponse(socket, .not_found);
 }
 
-fn handleUpgradeRequest(cfd: socket_t, raw_key: []const u8) !void {
+fn handleUpgradeRequest(socket: socket_t, raw_key: []const u8) !bool {
     const fixed_append = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     var sha = std.crypto.hash.Sha1.init(.{});
     sha.update(raw_key);
@@ -114,26 +123,27 @@ fn handleUpgradeRequest(cfd: socket_t, raw_key: []const u8) !void {
     sha.final(&hash);
     var hash64: [28]u8 = undefined;
     const encoder = std.base64.standard.Encoder;
-    try sendUpgradeResponse(cfd, encoder.encode(&hash64, &hash));
+    try sendUpgradeResponse(socket, encoder.encode(&hash64, &hash));
+    return true;
 }
 
-fn sendUpgradeResponse(fd: socket_t, hash_str: []const u8) !void {
+fn sendUpgradeResponse(socket: socket_t, hash_str: []const u8) !void {
     var buf: [0x100]u8 = undefined;
     const fmt = "HTTP/1.1 " ++ statusString(.switching_protocols)
         ++ "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n";
     const s = std.fmt.bufPrint(&buf, fmt, .{hash_str}) catch unreachable;
-    const n = try os.send(fd, s, 0);
+    const n = try os.send(socket, s, 0);
     if (n != s.len) return error.SendTruncated;
     debug_log.logSend(s);
 }
 
 fn initSocket(port: u16) !socket_t {
-    const fd = try os.socket(os.AF.INET, os.SOCK.STREAM | os.SOCK.CLOEXEC, 0);
+    const sfd = try os.socket(os.AF.INET, os.SOCK.STREAM | os.SOCK.CLOEXEC, 0);
     const address = IpAddress.init(.{ 0, 0, 0, 0 }, port);
-    try os.bind(fd, @ptrCast(*const os.sockaddr, &address), @sizeOf(IpAddress));
+    try os.bind(sfd, @ptrCast(*const os.sockaddr, &address), @sizeOf(IpAddress));
     const backlog = 10;
-    try os.listen(fd, backlog);
-    return fd;
+    try os.listen(sfd, backlog);
+    return sfd;
 }
 
 fn waitForConnection(sfd: socket_t) !socket_t {
@@ -141,12 +151,12 @@ fn waitForConnection(sfd: socket_t) !socket_t {
     var peer_address_size: os.socklen_t = @sizeOf(IpAddress);
     const cfd = try os.accept(sfd, @ptrCast(*os.sockaddr, &peer_address), &peer_address_size, os.SOCK.CLOEXEC);
     if (peer_address_size != @sizeOf(IpAddress)) return error.PeerAddressSize;
-    logAddress("client connected: {s}", &peer_address);
+    logAddress("peer connected: {s}", &peer_address);
     return cfd;
 }
 
-fn waitForRequest(fd: socket_t, buf: []u8) ![]u8 {
-    const n = try os.recv(fd, buf, 0);
+fn waitForRequest(socket: socket_t, buf: []u8) ![]u8 {
+    const n = try os.recv(socket, buf, 0);
     if (n == buf.len) return error.BufferFull;
     return buf[0..n];
 }
@@ -276,10 +286,10 @@ test "header line iterator" {
     try expect(null == it.next());
 }
 
-fn sendErrorResponse(fd: socket_t, comptime status: std.http.Status) !void {
+fn sendErrorResponse(socket: socket_t, comptime status: std.http.Status) !void {
     var buf: [0x100]u8 = undefined;
     const s = writeErrorResponse(status, &buf);
-    const n = try os.send(fd, s, 0);
+    const n = try os.send(socket, s, 0);
     if (n != s.len) return error.SendTruncated;
     debug_log.logSend(s);
 }
