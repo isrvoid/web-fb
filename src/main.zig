@@ -60,7 +60,7 @@ var debug_log: DebugLog = .{};
 
 pub fn main() !void {
     const sfd = try initSocket(8080);
-    defer os.closeSocket(sfd);
+    defer os.close(sfd);
     try debug_log.init("/tmp/requestLog.txt");
     defer debug_log.deinit();
     var request_buf: [0x400]u8 = undefined;
@@ -70,7 +70,10 @@ pub fn main() !void {
         while (true) {
             const raw_request = try waitForRequest(cfd, &request_buf);
             debug_log.logRecv(if (raw_request.len > 0) raw_request else "end-of-file (0 length)\n");
-            if (raw_request.len == 0) continue :outer; // end-of-file (peer orderly shutdown)
+            if (raw_request.len == 0) { // peer has closed
+                os.close(cfd);
+                continue :outer;
+            }
             const request = res: {
                 const request_ = parseRequest(raw_request);
                 if (request_ == null) {
@@ -83,24 +86,75 @@ pub fn main() !void {
                 .GET => {
                     if (request.is_upgrade_request) {
                         if (try handleUpgradeRequest(cfd, request.raw_websocket_key.?)) break;
-                    } else
-                        try handleGetFileRequest(cfd, request);
+                    } else try handleGetFileRequest(cfd, request);
                 },
                 else => try sendErrorResponse(cfd, .not_implemented),
             }
         }
         try serveWs(cfd, &request_buf);
-        os.closeSocket(cfd);
+        os.close(cfd);
     }
 }
 
+// TODO move ws functions into struct
+// not meant to be transparent; refer to RFC 6455
 fn serveWs(socket: socket_t, buf: []u8) !void {
-    while (true) {
-        // FIXME implement
-        const n = try os.recv(socket, buf, 0);
-        if (n == 0 or n == 8) break;
+    // buf.len is max payload data length
+    // can receive max length ping; for now only supports extended length 16
+    std.debug.assert(buf.len >= 125 and buf.len <= 1 << 16);
+    //const initial_read = @min(0x100, buf.len); FIXME
+    var read_i: usize = 0;
+    while (true) : (read_i = 0) {
+        // TODO maybe move (trailing) truncated message; reallocate header
+        const n = try os.recv(socket, buf[read_i..], 0);
+        if (n == 0) break; // out-of-spec peer shutdown
+        read_i += n;
+        const opcode = buf[0] & 0x0f;
+        // prioritize close opcode, ignoring possible protocol errors
+        if (opcode == 8) {
+            try sendWsClose(socket, .going_away); // status is probable guess (spec-compliant; avoids parsing)
+            break;
+        }
+        // FIXME decouple reading of further bytes (shouldn't go through here)
+        if (read_i < 2) continue;
+        const no_mask = buf[1] & 0x80 == 0;
+        // fragmented messages, extended length 64, are not supported (non spec compliant)
+        const is_early_closing = buf[0] & 0xf7 != 0x81 and buf[0] & 0xf7 != 0x82 or no_mask or buf[1] == 0xff;
+        if (is_early_closing) {
+            const is_fin = buf[0] & 0x80 != 0;
+            // non protocol_error status might be incorrect for spec violating peers (not that important)
+            const close_status: WsCloseStatus = if (!is_fin and (opcode == 1 or opcode == 2)) .policy_violation
+                else if (buf[1] == 0xff) .message_too_big else .protocol_error;
+            try sendWsClose(socket, close_status);
+            break;
+        }
+        // TODO unmask
+        // TODO hanle or ignore length protocol error
+        // TODO ping/pong (length 7); text/binary
+
+        // TODO further bytes
+        // TODO realloc if the message doesn't fit; move head, if received length matches message
+        // there is a case where the header doesn't fit - can special treatment be avoided?
     }
+
+    try os.shutdown(socket, .send);
+    while (try os.recv(socket, buf, 0) != 0) {}
 }
+
+fn sendWsClose(socket: socket_t, code: WsCloseStatus) !void {
+    const code_val = @enumToInt(code);
+    const msg = [4]u8{ 0x88, 0x02, @truncate(u8, code_val >> 8), @truncate(u8, code_val) };
+    var write_i: usize = 0;
+    while (write_i < msg.len)
+        write_i += try os.send(socket, msg[write_i..], 0);
+}
+
+const WsCloseStatus = enum(u16) {
+    going_away = 1001,
+    protocol_error = 1002,
+    policy_violation = 1008,
+    message_too_big = 1009,
+};
 
 fn handleGetFileRequest(socket: socket_t, request: Request) !void {
     const close_after = ".wasm"; // last file before expected upgrade request
@@ -110,8 +164,7 @@ fn handleGetFileRequest(socket: socket_t, request: Request) !void {
     if (path_) |path| {
         const should_close = mem.endsWith(u8, path, close_after);
         try sendFileResponse(socket, path, should_close);
-    } else
-        try sendErrorResponse(socket, .not_found);
+    } else try sendErrorResponse(socket, .not_found);
 }
 
 fn handleUpgradeRequest(socket: socket_t, raw_key: []const u8) !bool {
