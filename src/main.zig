@@ -85,49 +85,78 @@ pub fn main() !void {
             switch (request.method) {
                 .GET => {
                     if (request.is_upgrade_request) {
-                        if (try handleUpgradeRequest(cfd, request.raw_websocket_key.?)) break;
+                        if (try handleUpgradeRequest(cfd, request.raw_websocket_key.?)) {
+                            handOverWsConnection(cfd);
+                            continue :outer;
+                        }
                     } else try handleGetFileRequest(cfd, request);
                 },
                 else => try sendErrorResponse(cfd, .not_implemented),
             }
         }
-        try serveWs(cfd, &request_buf);
-        os.close(cfd);
     }
 }
 
-// TODO move ws functions into struct
-// not meant to be transparent; refer to RFC 6455
-fn serveWs(socket: socket_t, buf: []u8) !void {
-    // buf.len is max payload data length
-    // can receive max length ping; for now only supports extended length 16
-    std.debug.assert(buf.len >= 125 and buf.len <= 1 << 16);
-    //const initial_read = @min(0x100, buf.len); FIXME
-    var read_i: usize = 0;
-    while (true) : (read_i = 0) {
+// Why not use an available WebSocket implementation?
+// If we ignore the extensions, WebSocket is a simple protocol. The frame has just a few control bits.
+// Projects with hundreds of lines of code and multiple files have extra stuff not needed here.
+// web-fb uses binary messages of known length. It should take few ten lines to implement (tests excluded).
+
+const WebSocket = struct {
+    fd: socket_t,
+    buf: []u8,
+    read_i: usize = 0,
+    is_open: bool = true,
+    is_binary: bool = undefined,
+
+    const Self = @This();
+
+    const CloseStatus = enum(u16) {
+        going_away = 1001,
+        protocol_error = 1002,
+        policy_violation = 1008,
+        message_too_big = 1009,
+    };
+
+    // receive_buf.len is max receivable payload length
+    fn init(socket: socket_t, receive_buf: []u8) WebSocket {
+        // for now only supports receiving up to 0xffff (extended length 16)
+        std.debug.assert(receive_buf.len >= 125 and receive_buf.len <= 1 << 16);
+        return .{ .fd = socket, .buf = receive_buf };
+    }
+
+    // check is_open after null result; deplete periodically from a single thread
+    // non-blocking; result is only valid until the next call
+    fn next(self: *Self) !?[]const u8 {
+        // not meant to be transparent; refer to RFC 6455
+        std.debug.assert(self.is_open);
+        //const initial_read = @min(0x100, buf.len); FIXME
         // TODO maybe move (trailing) truncated message; reallocate header
-        const n = try os.recv(socket, buf[read_i..], 0);
-        if (n == 0) break; // out-of-spec peer shutdown
-        read_i += n;
-        const opcode = buf[0] & 0x0f;
+        if (!try self.recv(2))
+            return null;
+
+        const frame0 = self.buf[0];
+        const frame1 = self.buf[1];
+        const opcode = frame0 & 0x0f;
         // prioritize close opcode, ignoring possible protocol errors
         if (opcode == 8) {
-            try sendWsClose(socket, .going_away); // status is probable guess (spec-compliant; avoids parsing)
-            break;
+            try self.close(.going_away); // status is probable guess (spec-compliant; avoids parsing)
+            return null;
         }
         // FIXME decouple reading of further bytes (shouldn't go through here)
-        if (read_i < 2) continue;
-        const no_mask = buf[1] & 0x80 == 0;
-        // fragmented messages, extended length 64, are not supported (non spec compliant)
-        const is_early_closing = buf[0] & 0xf7 != 0x81 and buf[0] & 0xf7 != 0x82 or no_mask or buf[1] == 0xff;
-        if (is_early_closing) {
-            const is_fin = buf[0] & 0x80 != 0;
+        // fragmented messages are not supported (non spec compliant)
+        const is_closing_bulk = frame0 & 0xf7 != 0x81 and frame0 & 0xf7 != 0x82 or frame1 & 0x80 == 0 or frame1 == 0xff;
+        if (is_closing_bulk) {
+            const is_fin = frame0 & 0x80 != 0;
+            const is_text_or_binary = opcode == 1 or opcode == 2;
             // non protocol_error status might be incorrect for spec violating peers (not that important)
-            const close_status: WsCloseStatus = if (!is_fin and (opcode == 1 or opcode == 2)) .policy_violation
-                else if (buf[1] == 0xff) .message_too_big else .protocol_error;
-            try sendWsClose(socket, close_status);
-            break;
+            const close_status: WebSocket.CloseStatus = if (!is_fin and is_text_or_binary) .policy_violation
+                else if (frame1 == 0xff) .message_too_big else .protocol_error;
+            try self.close(close_status);
+            return null;
         }
+        return null; // FIXME
+        // only remaining close reason is length (message too big and protocol errors)
         // TODO unmask
         // TODO hanle or ignore length protocol error
         // TODO ping/pong (length 7); text/binary
@@ -137,24 +166,51 @@ fn serveWs(socket: socket_t, buf: []u8) !void {
         // there is a case where the header doesn't fit - can special treatment be avoided?
     }
 
-    try os.shutdown(socket, .send);
-    while (try os.recv(socket, buf, 0) != 0) {}
-}
+    fn send(_: *Self, _: []const u8) !void {
+        // FIXME
+    }
 
-fn sendWsClose(socket: socket_t, code: WsCloseStatus) !void {
-    const code_val = @enumToInt(code);
-    const msg = [4]u8{ 0x88, 0x02, @truncate(u8, code_val >> 8), @truncate(u8, code_val) };
-    var write_i: usize = 0;
-    while (write_i < msg.len)
-        write_i += try os.send(socket, msg[write_i..], 0);
-}
+    fn recv(self: *Self, read_i: usize) !bool {
+        // TODO set NONBLOCK instead of using flag
+        const n = os.recv(self.fd, self.buf[self.read_i..], os.linux.MSG.DONTWAIT) catch |err| return if (err == std.os.RecvFromError.WouldBlock) false else err;
+        if (n == 0) { // out-of-spec peer shutdown
+            self.is_open = false;
+            os.close(self.fd);
+            return false;
+        }
+        self.read_i += n;
+        return self.read_i >= read_i;
+    }
 
-const WsCloseStatus = enum(u16) {
-    going_away = 1001,
-    protocol_error = 1002,
-    policy_violation = 1008,
-    message_too_big = 1009,
+    fn close(self: *Self, status: WebSocket.CloseStatus) !void {
+        try self.sendClose(status);
+        self.is_open = false;
+        try os.shutdown(self.fd, .send);
+        while (try os.recv(self.fd, self.buf, 0) != 0) {}
+        os.close(self.fd);
+    }
+
+    fn sendClose(self: *const Self, status: WebSocket.CloseStatus) !void {
+        const status_val = @enumToInt(status);
+        const msg = [4]u8{ 0x88, 0x02, @truncate(u8, status_val >> 8), @truncate(u8, status_val) };
+        var write_i: usize = 0;
+        while (write_i < msg.len)
+            write_i += try os.send(self.fd, msg[write_i..], 0);
+    }
 };
+
+fn handOverWsConnection(socket: socket_t) void {
+    // FIXME push the socket somewhere else and return; this is just for debugging
+    var buf: [0x1000]u8 = undefined;
+    var ws = WebSocket.init(socket, &buf);
+    while (ws.is_open) {
+        // FIXME
+        while (ws.next() catch unreachable) |msg| {
+            _ = msg;
+        }
+        std.time.sleep(1e6);
+    }
+}
 
 fn handleGetFileRequest(socket: socket_t, request: Request) !void {
     const close_after = ".wasm"; // last file before expected upgrade request
