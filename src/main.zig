@@ -98,16 +98,21 @@ pub fn main() !void {
 }
 
 // Why not use an available WebSocket implementation?
-// If we ignore the extensions, WebSocket is a simple protocol. The frame has just a few control bits.
+// If we ignore the extensions, WebSocket is a simple protocol. The header has just a few control bits.
 // Projects with hundreds of lines of code and multiple files have extra stuff not needed here.
-// web-fb uses binary messages of known length. It should take few ten lines to implement (tests excluded).
+// web-fb uses binary messages of known length. The code should span few ten lines (tests excluded).
 
 const WebSocket = struct {
-    fd: socket_t,
     buf: []u8,
+    fd: socket_t,
+    mkey: [4]u8 = undefined,
+    start_i: usize = undefined,
+    end_i: usize = 0,
     read_i: usize = 0,
-    is_open: bool = true,
+    reading_header: bool = true,
     is_binary: bool = undefined,
+    recv_type: MessageType = undefined,
+    is_open: bool = true,
 
     const Self = @This();
 
@@ -117,11 +122,17 @@ const WebSocket = struct {
         policy_violation = 1008,
         message_too_big = 1009,
     };
+    const MessageType = enum {
+        data,
+        ping,
+        pong,
+    };
+    const max_control_data_len = 125;
 
     // receive_buf.len is max receivable payload length
     fn init(socket: socket_t, receive_buf: []u8) WebSocket {
         // for now only supports receiving up to 0xffff (extended length 16)
-        std.debug.assert(receive_buf.len >= 125 and receive_buf.len <= 1 << 16);
+        std.debug.assert(receive_buf.len >= max_control_data_len and receive_buf.len <= 1 << 16);
         return .{ .fd = socket, .buf = receive_buf };
     }
 
@@ -129,49 +140,77 @@ const WebSocket = struct {
     // non-blocking; result is only valid until the next call
     fn next(self: *Self) !?[]const u8 {
         // not meant to be transparent; refer to RFC 6455
+        // aims to be fastest and correct for compliant peers
+        // if the peer violates spec (protocol errors), closing status code might be questionable
         std.debug.assert(self.is_open);
-        //const initial_read = @min(0x100, buf.len); FIXME
-        // TODO maybe move (trailing) truncated message; reallocate header
-        if (!try self.recv(2))
-            return null;
+        if (self.reading_header and !try self.readHeader()) return null;
+        if (self.read_i < self.end_i and !try self.recv(self.end_i)) return null;
 
-        const frame0 = self.buf[0];
-        const frame1 = self.buf[1];
-        const opcode = frame0 & 0x0f;
-        // prioritize close opcode, ignoring possible protocol errors
-        if (opcode == 8) {
-            try self.close(.going_away); // status is probable guess (spec-compliant; avoids parsing)
-            return null;
+        defer self.postFrameCleanup();
+        const data = self.unmask();
+        switch (self.recv_type) {
+            .data => return data,
+            .ping => { try self.sendPong(data); return null; },
+            .pong => return null, // spec allows unsolicited PONG
         }
-        // FIXME decouple reading of further bytes (shouldn't go through here)
-        // fragmented messages are not supported (non spec compliant)
-        const is_closing_bulk = frame0 & 0xf7 != 0x81 and frame0 & 0xf7 != 0x82 or frame1 & 0x80 == 0 or frame1 == 0xff;
-        if (is_closing_bulk) {
-            const is_fin = frame0 & 0x80 != 0;
-            const is_text_or_binary = opcode == 1 or opcode == 2;
-            // non protocol_error status might be incorrect for spec violating peers (not that important)
-            const close_status: WebSocket.CloseStatus = if (!is_fin and is_text_or_binary) .policy_violation
-                else if (frame1 == 0xff) .message_too_big else .protocol_error;
-            try self.close(close_status);
-            return null;
-        }
-        return null; // FIXME
-        // only remaining close reason is length (message too big and protocol errors)
-        // TODO unmask
-        // TODO hanle or ignore length protocol error
-        // TODO ping/pong (length 7); text/binary
-
-        // TODO further bytes
-        // TODO realloc if the message doesn't fit; move head, if received length matches message
-        // there is a case where the header doesn't fit - can special treatment be avoided?
     }
 
     fn send(_: *Self, _: []const u8) !void {
         // FIXME
     }
 
-    fn recv(self: *Self, read_i: usize) !bool {
-        // TODO set NONBLOCK instead of using flag
+    fn sendPong(self: *Self, data: []const u8) !void {
+        std.debug.assert(data.len <= max_control_data_len);
+        const header = [2]u8{ 0x8a, @truncate(u7, data.len) };
+        // TODO lock
+        _ = try os.send(self.fd, &header, 0);
+        _ = try os.send(self.fd, data, 0);
+    }
+
+    fn readHeader(self: *Self) !bool {
+        //const initial_read = @min(0x100, buf.len); FIXME
+        // TODO maybe move (trailing) truncated message; reallocate header
+        if (self.read_i < self.end_i + 2 and !try self.recv(self.end_i + 2)) return false;
+
+        const h0 = self.buf[0];
+        const h1 = self.buf[1];
+        const opcode = h0 & 0x0f;
+        const is_peer_closing = opcode == 8;
+        if (is_peer_closing) {
+            try self.close(.going_away); // status is probable guess (spec-compliant; avoids parsing)
+            return false;
+        }
+        // TODO length first?
+        // fragmented messages are not supported (non spec compliant)
+        const is_closing_bulk = h0 & 0xf7 != 0x81 and h0 & 0xf7 != 0x82 or h1 & 0x80 == 0 or h1 == 0xff;
+        if (is_closing_bulk) {
+            const is_fin = h0 & 0x80 != 0;
+            const is_text_or_binary = opcode == 1 or opcode == 2;
+            // non protocol_error status might be incorrect for spec violating peers (not that important)
+            const close_status: WebSocket.CloseStatus = if (!is_fin and is_text_or_binary) .policy_violation
+                else if (h1 == 0xff) .message_too_big else .protocol_error;
+            try self.close(close_status);
+            return false;
+        }
+        // only remaining close reason is length (message too big and protocol errors)
+        // TODO hanle or ignore length protocol error
+        // TODO set members
+        // TODO realloc if the message doesn't fit; move head, if received length matches message
+        // there is a case where the header doesn't fit - can special treatment be avoided?
+        return true;
+    }
+
+    fn unmask(self: *Self) []u8 {
+        // FIXME
+        return self.buf[self.start_i..self.end_i];
+    }
+
+    fn postFrameCleanup(_: *Self) void {
+        // FIXME
+    }
+
+    fn recv(self: *Self, min_i: usize) !bool {
+        std.debug.assert(min_i > self.read_i);
         const n = os.recv(self.fd, self.buf[self.read_i..], os.linux.MSG.DONTWAIT) catch |err| return if (err == std.os.RecvFromError.WouldBlock) false else err;
         if (n == 0) { // out-of-spec peer shutdown
             self.is_open = false;
@@ -179,7 +218,7 @@ const WebSocket = struct {
             return false;
         }
         self.read_i += n;
-        return self.read_i >= read_i;
+        return self.read_i >= min_i;
     }
 
     fn close(self: *Self, status: WebSocket.CloseStatus) !void {
@@ -192,10 +231,8 @@ const WebSocket = struct {
 
     fn sendClose(self: *const Self, status: WebSocket.CloseStatus) !void {
         const status_val = @enumToInt(status);
-        const msg = [4]u8{ 0x88, 0x02, @truncate(u8, status_val >> 8), @truncate(u8, status_val) };
-        var write_i: usize = 0;
-        while (write_i < msg.len)
-            write_i += try os.send(self.fd, msg[write_i..], 0);
+        const frame = [4]u8{ 0x88, 0x02, @truncate(u8, status_val >> 8), @truncate(u8, status_val) };
+        _ = try os.send(self.fd, &frame, 0);
     }
 };
 
