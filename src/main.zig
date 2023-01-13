@@ -278,8 +278,7 @@ fn sendUpgradeResponse(socket: socket_t, hash_str: []const u8) !void {
     const fmt = "HTTP/1.1 " ++ statusString(.switching_protocols)
         ++ "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n";
     const s = std.fmt.bufPrint(&buf, fmt, .{hash_str}) catch unreachable;
-    const n = try os.send(socket, s, 0);
-    if (n != s.len) return error.SendTruncated;
+    _ = try os.send(socket, s, 0);
     debug_log.logSend(s);
 }
 
@@ -435,8 +434,7 @@ test "header line iterator" {
 fn sendErrorResponse(socket: socket_t, comptime status: std.http.Status) !void {
     var buf: [0x100]u8 = undefined;
     const s = writeErrorResponse(status, &buf);
-    const n = try os.send(socket, s, 0);
-    if (n != s.len) return error.SendTruncated;
+    _ = try os.send(socket, s, 0);
     debug_log.logSend(s);
 }
 
@@ -470,8 +468,7 @@ fn sendFileResponse(socket: socket_t, path: []const u8, close_connection: bool) 
     const content_len: usize = try file.getEndPos();
     var header_buf: [0x100]u8 = undefined;
     const header = writeHeader(content_len, contentType(path), close_connection, &header_buf);
-    var n = try os.send(socket, header, 0);
-    if (n != header.len) return error.SendTruncated;
+    _ = try os.send(socket, header, 0);
     try sendFile(socket, file, content_len);
     debug_log.logSendFile(header, path);
 }
@@ -497,13 +494,9 @@ fn sendFile(socket: socket_t, file: std.fs.File, len: usize) !void {
     var file_i: usize = 0;
     while (file_i < len) {
         const buf_i = try file.read(&buf);
-        if (buf_i == 0) return error.FileTruncated; // file changed during response (shouldn't happen)
         file_i += buf_i;
-        var send_i: usize = 0;
-        while (send_i < buf_i) {
-            const n = try os.send(socket, buf[send_i..buf_i], 0);
-            send_i += n;
-        }
+        if (buf_i == 0) return error.FileTruncated; // file changed during response (shouldn't happen)
+        _ = try os.send(socket, buf[0..buf_i], 0);
     }
 }
 
