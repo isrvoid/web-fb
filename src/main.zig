@@ -56,7 +56,7 @@ const DebugLog = struct {
     }
 };
 
-var debug_log: DebugLog = .{};
+var debug_log = DebugLog{};
 
 pub fn main() !void {
     const sfd = try initSocket(8080);
@@ -138,7 +138,7 @@ const WebSocket = struct {
 
     // check is_open after null result; deplete periodically from a single thread
     // non-blocking; result is only valid until the next call
-    fn next(self: *Self) !?[]const u8 {
+    fn recvNext(self: *Self) !?[]const u8 {
         // not meant to be transparent; refer to RFC 6455
         // aims to be fastest and correct for compliant peers
         // if the peer violates spec (protocol errors), closing status code might be questionable
@@ -150,7 +150,10 @@ const WebSocket = struct {
         const data = self.unmask();
         switch (self.recv_type) {
             .data => return data,
-            .ping => { try self.sendPong(data); return null; },
+            .ping => {
+                try self.sendPong(data);
+                return null;
+            },
             .pong => return null, // spec allows unsolicited PONG
         }
     }
@@ -242,7 +245,7 @@ fn handOverWsConnection(socket: socket_t) void {
     var ws = WebSocket.init(socket, &buf);
     while (ws.is_open) {
         // FIXME
-        while (ws.next() catch unreachable) |msg| {
+        while (ws.recvNext() catch unreachable) |msg| {
             _ = msg;
         }
         std.time.sleep(1e6);
