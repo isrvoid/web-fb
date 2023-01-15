@@ -204,8 +204,31 @@ const WebSocket = struct {
     }
 
     fn unmask(self: *Self) []u8 {
-        // FIXME
-        return self.buf[self.start_i..self.end_i];
+        var res = self.buf[self.start_i..self.end_i];
+        if (self.end_i - self.start_i <= 32) {
+            for (res) |*v, i|
+                v.* ^= self.mkey[i % 4];
+        } else {
+            const Key = extern union {
+                bytes: [4]u8,
+                val: u32,
+            };
+            const start = @ptrToInt(&self.buf[self.start_i]);
+            const end = @ptrToInt(&self.buf[self.end_i]);
+            const past_aligned = start & 3;
+            const al_inc = @intCast(usize, @boolToInt(past_aligned != 0)) * 4 - past_aligned;
+            const aligned_start = start + al_inc;
+            const key = Key{ .bytes = .{ self.mkey[al_inc], self.mkey[al_inc + 1 & 3], self.mkey[al_inc + 2 & 3], self.mkey[al_inc + 3 & 3] } };
+            var i = start;
+            while (i < aligned_start) : (i += 1)
+                @intToPtr(*u8, i).* ^= key.bytes[i & 3];
+            while (i < end) : (i += 4)
+                @intToPtr(*u32, i).* ^= key.val;
+            i = end & ~@as(usize, 3);
+            while (i < end) : (i += 1)
+                @intToPtr(*u8, i).* ^= key.bytes[i & 3];
+        }
+        return res;
     }
 
     fn postFrameCleanup(_: *Self) void {
