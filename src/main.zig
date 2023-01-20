@@ -1,6 +1,7 @@
 const std = @import("std");
 const os = std.os;
 const mem = std.mem;
+const assert = std.debug.assert;
 
 const IpAddress = std.net.Ip4Address;
 const socket_t = std.os.socket_t;
@@ -132,7 +133,7 @@ const WebSocket = struct {
     // receive_buf.len is max receivable payload length
     fn init(socket: socket_t, receive_buf: []u8) WebSocket {
         // for now only supports receiving up to 0xffff (extended length 16)
-        std.debug.assert(receive_buf.len >= max_control_data_len and receive_buf.len <= 1 << 16);
+        assert(receive_buf.len >= max_control_data_len and receive_buf.len <= 1 << 16);
         return .{ .fd = socket, .buf = receive_buf };
     }
 
@@ -140,9 +141,9 @@ const WebSocket = struct {
     // non-blocking; result is only valid until the next call
     fn recvNext(self: *Self) !?[]const u8 {
         // not meant to be transparent; refer to RFC 6455
-        // aims to be fastest and correct for compliant peers
+        // aims to be fast and correct for compliant peers
         // if the peer violates spec (protocol errors), closing status code might be questionable
-        std.debug.assert(self.is_open);
+        assert(self.is_open);
         if (self.reading_header and !try self.readHeader()) return null;
         if (self.read_i < self.end_i and !try self.recv(self.end_i)) return null;
 
@@ -158,12 +159,25 @@ const WebSocket = struct {
         }
     }
 
-    fn send(_: *Self, _: []const u8) !void {
-        // FIXME
+    fn send(self: *Self, data: []const u8) !void {
+        const len = union {
+            bytes: [8]u8,
+            len_be: u64,
+        }{ .len_be = mem.nativeToBig(u64, data.len) };
+        const h0 = 0x82;
+        const header: []const u8 =
+            if (data.len <= max_control_data_len)
+                &[2]u8{ h0, len.bytes[7] }
+            else if (data.len < 1 << 16)
+                &[2]u8{ h0, 0x7e } ++ len.bytes[6..8]
+            else &[2]u8{ h0, 0x7f } ++ len.bytes;
+        // TODO lock
+        _ = try os.send(self.fd, header, 0);
+        _ = try os.send(self.fd, data, 0);
     }
 
     fn sendPong(self: *Self, data: []const u8) !void {
-        std.debug.assert(data.len <= max_control_data_len);
+        assert(data.len <= max_control_data_len);
         const header = [2]u8{ 0x8a, @truncate(u7, data.len) };
         // TODO lock
         _ = try os.send(self.fd, &header, 0);
@@ -236,7 +250,7 @@ const WebSocket = struct {
     }
 
     fn recv(self: *Self, min_i: usize) !bool {
-        std.debug.assert(min_i > self.read_i);
+        assert(min_i > self.read_i);
         const n = os.recv(self.fd, self.buf[self.read_i..], os.linux.MSG.DONTWAIT) catch |err| return if (err == std.os.RecvFromError.WouldBlock) false else err;
         if (n == 0) { // out-of-spec peer shutdown
             self.is_open = false;
@@ -547,7 +561,7 @@ const web_root = "web-root/";
 fn sanitizedPath(raw: []const u8, result_buf: *[std.fs.MAX_PATH_BYTES]u8) ?[]u8 {
     if (raw.len == 0 or raw[0] != '/') return null;
     // target starts with '/', otherwise relative() could return ".." and escape web_root directory
-    std.debug.assert(raw[0] == '/');
+    assert(raw[0] == '/');
     var sanitized_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     const sanitized = res: {
         var fba = std.heap.FixedBufferAllocator.init(sanitized_buf[web_root.len..]);
