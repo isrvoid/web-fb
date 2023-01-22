@@ -123,10 +123,13 @@ const WebSocket = struct {
         policy_violation = 1008,
         message_too_big = 1009,
     };
-    const Bytes64 = union {
-        val: u64,
-        bytes: [8]u8,
-    };
+    fn ValBytes(comptime T: type) type {
+        return extern union {
+            val: T,
+            a: [@sizeOf(T)]u8,
+        };
+    }
+    const LenBytes = ValBytes(u64);
     const len7_max = 125;
 
     // receive_buf.len is max receivable payload length
@@ -150,9 +153,9 @@ const WebSocket = struct {
         const header: []const u8 = res: {
             if (data.len <= len7_max) break :res &[2]u8{ h0, @truncate(u8, data.len) };
 
-            const len = Bytes64{ .val = mem.nativeToBig(u64, data.len) };
-            if (data.len < 1 << 16) break :res &[2]u8{ h0, 0x7e } ++ len.bytes[6..8];
-            break :res &[2]u8{ h0, 0x7f } ++ len.bytes;
+            const len = LenBytes{ .val = mem.nativeToBig(u64, data.len) };
+            if (data.len < 1 << 16) break :res &[2]u8{ h0, 0x7e } ++ len.a[6..8];
+            break :res &[2]u8{ h0, 0x7f } ++ len.a;
         };
         // TODO lock
         _ = try os.send(self.fd, header, 0);
@@ -193,13 +196,13 @@ const WebSocket = struct {
         const len: usize = res: {
             if (len7 <= len7_max) break :res len7;
 
-            var lb = Bytes64{ .val = 0 };
+            var lb = LenBytes{ .val = 0 };
             const ext_len_bytes = self.buf[header_i + 2 .. header_i + 2 + num_ext_bytes];
             if (comptime @import("builtin").cpu.arch.endian() == .Little) {
                 for (ext_len_bytes) |v, i|
-                    lb.bytes[num_ext_bytes - 1 - i] = v;
+                    lb.a[num_ext_bytes - 1 - i] = v;
             } else { // big endian
-                mem.copy(u8, lb.bytes[8 - num_ext_bytes .. 8], ext_len_bytes);
+                mem.copy(u8, lb.a[8 - num_ext_bytes .. 8], ext_len_bytes);
             }
             const len = lb.val;
 
@@ -235,28 +238,24 @@ const WebSocket = struct {
 
     fn unmask(self: *Self) []u8 {
         var res = self.buf[self.start_i..self.end_i];
-        if (self.end_i - self.start_i <= 32) {
+        if (self.end_i - self.start_i < 32) {
             for (res) |*v, i|
                 v.* ^= self.mkey[i % 4];
         } else {
-            const Key = extern union {
-                bytes: [4]u8,
-                val: u32,
-            };
             const start = @ptrToInt(&self.buf[self.start_i]);
             const end = @ptrToInt(&self.buf[self.end_i]);
             const past_aligned = start & 3;
             const al_inc = @as(usize, @boolToInt(past_aligned != 0)) * 4 - past_aligned;
             const aligned_start = start + al_inc;
-            const key = Key{ .bytes = .{ self.mkey[al_inc], self.mkey[al_inc + 1 & 3], self.mkey[al_inc + 2 & 3], self.mkey[al_inc + 3 & 3] } };
+            const key = ValBytes(u32){ .a = .{ self.mkey[al_inc], self.mkey[al_inc + 1 & 3], self.mkey[al_inc + 2 & 3], self.mkey[al_inc + 3 & 3] } };
             var i = start;
             while (i < aligned_start) : (i += 1)
-                @intToPtr(*u8, i).* ^= key.bytes[i & 3];
+                @intToPtr(*u8, i).* ^= key.a[i & 3];
             while (i < end) : (i += 4)
                 @intToPtr(*u32, i).* ^= key.val;
             i = end & ~@as(usize, 3);
             while (i < end) : (i += 1)
-                @intToPtr(*u8, i).* ^= key.bytes[i & 3];
+                @intToPtr(*u8, i).* ^= key.a[i & 3];
         }
         return res;
     }
