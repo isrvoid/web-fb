@@ -244,18 +244,18 @@ const WebSocket = struct {
         } else {
             const start = @ptrToInt(&self.buf[self.start_i]);
             const end = @ptrToInt(&self.buf[self.end_i]);
-            const past_aligned = start & 3;
+            const aligned_end = end & ~@as(usize, 3);
+            const past_aligned = start % 4;
             const al_inc = @as(usize, @boolToInt(past_aligned != 0)) * 4 - past_aligned;
             const aligned_start = start + al_inc;
-            const key = ValBytes(u32){ .a = .{ self.mkey[al_inc], self.mkey[al_inc + 1 & 3], self.mkey[al_inc + 2 & 3], self.mkey[al_inc + 3 & 3] } };
+            const key = ValBytes(u32){ .a = .{ self.mkey[al_inc], self.mkey[al_inc+1 & 3], self.mkey[al_inc+2 & 3], self.mkey[al_inc+3 & 3] } };
             var i = start;
             while (i < aligned_start) : (i += 1)
-                @intToPtr(*u8, i).* ^= key.a[i & 3];
-            while (i < end) : (i += 4)
+                @intToPtr(*u8, i).* ^= key.a[i % 4];
+            while (i < aligned_end) : (i += 4)
                 @intToPtr(*u32, i).* ^= key.val;
-            i = end & ~@as(usize, 3);
             while (i < end) : (i += 1)
-                @intToPtr(*u8, i).* ^= key.a[i & 3];
+                @intToPtr(*u8, i).* ^= key.a[i % 4];
         }
         return res;
     }
