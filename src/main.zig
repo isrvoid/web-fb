@@ -113,8 +113,6 @@ const WebSocket = struct {
     read_i: usize = 0,
     reading_header: bool = true,
     is_binary: bool = undefined, // TODO make public
-    is_data: bool = undefined,
-    is_ping: bool = undefined,
     is_open: bool = true,
 
     const Self = @This();
@@ -143,13 +141,8 @@ const WebSocket = struct {
         assert(self.is_open);
         if (self.reading_header and !try self.readHeader()) return null;
         if (self.read_i < self.end_i and !try self.recv(self.end_i)) return null;
-
         defer self.postFrameCleanup();
-        const data = self.unmask();
-        if (self.is_data) return data;
-        if (self.is_ping) try self.sendPong(data);
-        // unsolicited pong (which the spec allows) is ignored
-        return null;
+        return self.unmask();
     }
 
     fn send(self: *Self, data: []const u8) !void {
@@ -166,14 +159,6 @@ const WebSocket = struct {
         _ = try os.send(self.fd, data, 0);
     }
 
-    fn sendPong(self: *Self, data: []const u8) !void {
-        assert(data.len <= len7_max);
-        const header = [2]u8{ 0x8a, @truncate(u7, data.len) };
-        // TODO lock
-        _ = try os.send(self.fd, &header, 0);
-        _ = try os.send(self.fd, data, 0);
-    }
-
     fn readHeader(self: *Self) !bool {
         // not meant to be transparent; refer to RFC 6455
         //const initial_read = @min(0x100, buf.len); FIXME
@@ -183,7 +168,7 @@ const WebSocket = struct {
         const h0 = self.buf[0];
         const h1 = self.buf[1];
         const opcode = h0 & 0x0f;
-        const is_peer_closing = opcode == 8;
+        const is_peer_closing = opcode == 0x8;
         const is_not_masked = h1 & 0x80 == 0; // catch mask early to remove it as a length variable
         if (is_peer_closing or is_not_masked) {
             // peer closing status is probable guess (spec-compliant; avoids parsing)
@@ -194,19 +179,16 @@ const WebSocket = struct {
         const num_ext_bytes = @as(u32, @boolToInt(len7 == 0x7e)) * 2 + @as(u32, @boolToInt(len7 == 0x7f)) * 8;
         const header_len = 2 + num_ext_bytes + 4;
         if (self.read_i < header_i + header_len and !try self.recv(header_i + header_len)) return false;
-        // fragmented messages are not supported (non spec compliant)
-        const is_other_error = h0 & 0xf7 != 0x81 and h0 & 0xf7 != 0x82;
+        // not supported (non spec compliant): fragmented messages, ping, pong
+        const is_other_error = h0 != 0x82 and h0 != 0x81;
         if (is_other_error) {
-            const is_not_fin = h0 & 0x80 == 0;
-            const is_text_or_binary = opcode == 1 or opcode == 2;
-            const close_status: CloseStatus = if (is_text_or_binary and is_not_fin) .policy_violation else .protocol_error;
+            const is_fragmented = h0 & 0x80 == 0 and (opcode == 0x1 or opcode == 0x2);
+            const is_ping = opcode == 0x9 or opcode == 0xa;
+            const close_status: CloseStatus = if (is_fragmented or is_ping) .policy_violation else .protocol_error;
             try self.close(close_status);
             return false;
         }
-        // remaining opcodes: 0x1 - text; 0x2 - binary; 0x9 - ping; 0xa - pong
-        self.is_data = opcode & 8 == 0;
-        self.is_binary = opcode & 1 == 0; // the value not corresponding -
-        self.is_ping = opcode & 1 != 0;   // to is_data is whatever
+        self.is_binary = opcode == 0x2;
 
         const len: usize = res: {
             if (len7 <= len7_max) break :res len7;
@@ -223,10 +205,8 @@ const WebSocket = struct {
 
             // assert in init() makes len > buf.len also cover length64 MSB != 0
             // encoding with minimal number of bytes is not enforced (no protocol error)
-            const is_length_error = len > self.buf.len or !self.is_data and len > len7_max;
-            if (is_length_error) {
-                const is_protocol_error = !self.is_data and len > len7_max or len & 1 << 63 != 0;
-                const close_status: CloseStatus = if (is_protocol_error) .protocol_error else .message_too_big;
+            if (len > self.buf.len) {
+                const close_status: CloseStatus = if (len & 1 << 63 != 0) .protocol_error else .message_too_big;
                 try self.close(close_status);
                 return false;
             }
