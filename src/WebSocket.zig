@@ -33,11 +33,10 @@ fn ValBytes(comptime T: type) type {
 }
 const LenBytes = ValBytes(u64);
 const len7_max = 125;
-const max_header_len = 14;
 
 // receive_buf.len is max receivable payload length
 pub fn init(socket: os.socket_t, receive_buf: []u8) Self {
-    assert(receive_buf.len >= max_header_len and receive_buf.len < 1 << 63);
+    assert(receive_buf.len >= len7_max and receive_buf.len < 1 << 63);
     return .{ .fd = socket, .buf = receive_buf };
 }
 
@@ -150,6 +149,7 @@ fn readHeader(self: *Self) !bool {
 }
 
 fn postFrameCleanup(self: *Self) void {
+    const max_header_len = 14;
     if (self.end_i == self.read_i) {
         self.end_i = 0;
         self.read_i = 0;
