@@ -167,8 +167,8 @@ fn unmask(self: *Self) []u8 {
         for (res) |*v, i|
             v.* ^= self.mkey[i % 4];
     } else {
-        const start = @ptrToInt(&self.buf[self.start_i]);
-        const end = @ptrToInt(&self.buf[self.end_i]);
+        const start = @ptrToInt(self.buf.ptr + self.start_i);
+        const end = @ptrToInt(self.buf.ptr + self.end_i);
         const aligned_end = end & ~@as(usize, 3);
         const past_aligned = start % 4;
         const al_inc = @as(usize, @boolToInt(past_aligned != 0)) * 4 - past_aligned;
