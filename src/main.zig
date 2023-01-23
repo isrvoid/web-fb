@@ -131,10 +131,11 @@ const WebSocket = struct {
     }
     const LenBytes = ValBytes(u64);
     const len7_max = 125;
+    const max_header_len = 14;
 
     // receive_buf.len is max receivable payload length
     fn init(socket: socket_t, receive_buf: []u8) WebSocket {
-        assert(receive_buf.len >= len7_max and receive_buf.len < 1 << 63);
+        assert(receive_buf.len >= max_header_len and receive_buf.len < 1 << 63);
         return .{ .fd = socket, .buf = receive_buf };
     }
 
@@ -164,12 +165,10 @@ const WebSocket = struct {
 
     fn readHeader(self: *Self) !bool {
         // not meant to be transparent; refer to RFC 6455
-        //const initial_read = @min(0x100, buf.len); FIXME
-        // TODO maybe move (trailing) truncated message; reallocate header
         const header_i = self.end_i;
         if (self.read_i < header_i + 2 and !try self.recv(header_i + 2)) return false;
-        const h0 = self.buf[0];
-        const h1 = self.buf[1];
+        const h0 = self.buf[header_i];
+        const h1 = self.buf[header_i + 1];
         const opcode = h0 & 0x0f;
         const is_peer_closing = opcode == 0x8;
         const is_not_masked = h1 & 0x80 == 0; // catch mask early to remove it as a length variable
@@ -218,22 +217,30 @@ const WebSocket = struct {
 
         const header_end_i = header_i + header_len;
         mem.copy(u8, &self.mkey, self.buf[header_end_i - 4 .. header_end_i]);
-        self.start_i = header_end_i;
-        self.end_i = self.start_i + len;
+        const data_fits_in_place = header_end_i <= self.buf.len - len; // '-' prevents wrapping on 32-bit arch
+        if (data_fits_in_place) {
+            self.start_i = header_end_i;
+            self.end_i = header_end_i + len;
+        } else {
+            mem.copy(u8, self.buf, self.buf[header_end_i..self.read_i]);
+            self.read_i -= header_end_i;
+            self.start_i = 0;
+            self.end_i = len;
+        }
         self.reading_header = false;
-        if (self.end_i > self.buf.len or self.end_i < self.start_i) @panic("fixme");
-
-        // TODO
-        // realloc if the message doesn't fit; move head, if received length matches message
-        // there is a case where the header doesn't fit - can special treatment be avoided?
         return true;
     }
 
     fn postFrameCleanup(self: *Self) void {
+        if (self.end_i == self.read_i) {
+            self.end_i = 0;
+            self.read_i = 0;
+        } else if (self.buf.len - self.end_i < max_header_len) { // ensure next header fits into buffer
+            mem.copy(u8, self.buf, self.buf[self.end_i..self.read_i]);
+            self.read_i -= self.end_i;
+            self.end_i = 0;
+        }
         self.reading_header = true;
-        // FIXME
-        self.end_i = 0;
-        self.read_i = 0;
     }
 
     fn unmask(self: *Self) []u8 {
@@ -260,16 +267,17 @@ const WebSocket = struct {
         return res;
     }
 
-    fn recv(self: *Self, min_i: usize) !bool {
-        assert(min_i > self.read_i);
-        const n = os.recv(self.fd, self.buf[self.read_i..], os.linux.MSG.DONTWAIT) catch |err| return if (err == std.os.RecvFromError.WouldBlock) false else err;
+    fn recv(self: *Self, min_read_i: usize) !bool {
+        assert(min_read_i > self.read_i and min_read_i <= self.buf.len);
+        const max_read_i = @min(min_read_i + 0x100, self.buf.len); // limit size of potential data move
+        const n = os.recv(self.fd, self.buf[self.read_i..max_read_i], os.linux.MSG.DONTWAIT) catch |err| return if (err == std.os.RecvFromError.WouldBlock) false else err;
         if (n == 0) { // out-of-spec peer shutdown
             self.is_open = false;
             os.close(self.fd);
             return false;
         }
         self.read_i += n;
-        return self.read_i >= min_i;
+        return self.read_i >= min_read_i;
     }
 
     fn close(self: *Self, status: WebSocket.CloseStatus) !void {
