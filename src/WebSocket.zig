@@ -15,7 +15,7 @@ start_i: usize = undefined,
 end_i: usize = 0,
 read_i: usize = 0,
 reading_header: bool = true,
-is_binary: bool = undefined, // TODO make public
+is_binary: bool = undefined,
 is_open: bool = true,
 
 const Self = @This();
@@ -41,7 +41,7 @@ pub fn init(socket: os.socket_t, receive_buf: []u8) Self {
     return .{ .fd = socket, .buf = receive_buf };
 }
 
-// check is_open after null result; deplete periodically from a single thread
+// check isOpen() after null result; deplete periodically from a single thread
 // non-blocking; result is only valid until the next call
 pub fn recvNext(self: *Self) !?[]const u8 {
     assert(self.is_open);
@@ -51,8 +51,24 @@ pub fn recvNext(self: *Self) !?[]const u8 {
     return self.unmask();
 }
 
+pub fn isOpen(self: *Self) bool {
+    return self.is_open;
+}
+
+// type of last message returned by recvNext(); 'false' for text
+pub fn isBinary(self: *Self) bool {
+    return self.is_binary;
+}
+
 pub fn send(self: *Self, data: []const u8) !void {
-    const h0 = 0x82;
+    return self.sendWithH0(data, 0x82);
+}
+
+pub fn sendText(self: *Self, data: []const u8) !void {
+    return self.sendWithH0(data, 0x81);
+}
+
+fn sendWithH0(self: *Self, data: []const u8, comptime h0: u8) !void {
     const header: []const u8 = res: {
         if (data.len <= len7_max) break :res &[2]u8{ h0, @truncate(u8, data.len) };
 
