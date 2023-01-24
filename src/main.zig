@@ -327,7 +327,7 @@ fn writeErrorResponse(comptime stat: std.http.Status, buf: []u8) []u8 {
 fn sendFileResponse(socket: socket_t, path: []const u8, close_connection: bool) !void {
     const file = try std.fs.openFileAbsolute(path, .{});
     defer file.close();
-    const content_len: usize = try file.getEndPos();
+    const content_len = @intCast(usize, try file.getEndPos());
     var header_buf: [0x100]u8 = undefined;
     const header = writeHeader(content_len, contentType(path), close_connection, &header_buf);
     _ = try os.send(socket, header, 0);
