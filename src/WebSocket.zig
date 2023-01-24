@@ -50,12 +50,12 @@ pub fn recvNext(self: *WebSocket) !?[]const u8 {
     return self.unmask();
 }
 
-pub fn isOpen(self: *WebSocket) bool {
+pub inline fn isOpen(self: *const WebSocket) bool {
     return self.is_open;
 }
 
 // type of last message returned by recvNext(); 'false' for text
-pub fn isBinary(self: *WebSocket) bool {
+pub inline fn isBinary(self: *const WebSocket) bool {
     return self.is_binary;
 }
 
@@ -65,6 +65,10 @@ pub fn send(self: *WebSocket, data: []const u8) !void {
 
 pub fn sendText(self: *WebSocket, data: []const u8) !void {
     return self.sendWithH0(data, 0x81);
+}
+
+pub fn close(self: *WebSocket) !void {
+    return self.closeWithStatus(.going_away);
 }
 
 fn sendWithH0(self: *WebSocket, data: []const u8, comptime h0: u8) !void {
@@ -91,7 +95,7 @@ fn readHeader(self: *WebSocket) !bool {
     const is_not_masked = h1 & 0x80 == 0; // catch mask early to remove it as a length variable
     if (is_peer_closing or is_not_masked) {
         // peer closing status is probable guess (spec-compliant; avoids parsing)
-        try self.close(if (is_peer_closing) .going_away else .protocol_error);
+        try self.closeWithStatus(if (is_peer_closing) .going_away else .protocol_error);
         return false;
     }
     const len7 = h1 & 0x7f;
@@ -104,7 +108,7 @@ fn readHeader(self: *WebSocket) !bool {
         const is_fragmented = h0 & 0x80 == 0 and (opcode == 0x1 or opcode == 0x2);
         const is_ping = opcode == 0x9 or opcode == 0xa;
         const close_status: CloseStatus = if (is_fragmented or is_ping) .policy_violation else .protocol_error;
-        try self.close(close_status);
+        try self.closeWithStatus(close_status);
         return false;
     }
     self.is_binary = opcode == 0x2;
@@ -126,7 +130,7 @@ fn readHeader(self: *WebSocket) !bool {
         // encoding with minimal number of bytes is not enforced (no protocol error)
         if (len > self.buf.len) {
             const close_status: CloseStatus = if (len & 1 << 63 != 0) .protocol_error else .message_too_big;
-            try self.close(close_status);
+            try self.closeWithStatus(close_status);
             return false;
         }
         break :res @truncate(usize, len);
@@ -198,7 +202,7 @@ fn recv(self: *WebSocket, min_read_i: usize) !bool {
     return self.read_i >= min_read_i;
 }
 
-fn close(self: *WebSocket, status: CloseStatus) !void {
+fn closeWithStatus(self: *WebSocket, status: CloseStatus) !void {
     try self.sendClose(status);
     self.is_open = false;
     try os.shutdown(self.fd, .send);
