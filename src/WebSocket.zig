@@ -18,7 +18,7 @@ reading_header: bool = true,
 is_binary: bool = undefined,
 is_open: bool = true,
 
-const Self = @This();
+const WebSocket = @This();
 const CloseStatus = enum(u16) {
     going_away = 1001,
     protocol_error = 1002,
@@ -35,14 +35,14 @@ const LenBytes = ValBytes(u64);
 const len7_max = 125;
 
 // receive_buf.len is max receivable payload length
-pub fn init(socket: os.socket_t, receive_buf: []u8) Self {
+pub fn init(socket: os.socket_t, receive_buf: []u8) WebSocket {
     assert(receive_buf.len >= len7_max and receive_buf.len < 1 << 63);
     return .{ .fd = socket, .buf = receive_buf };
 }
 
 // check isOpen() after null result; deplete periodically from a single thread
 // non-blocking; result is only valid until the next call
-pub fn recvNext(self: *Self) !?[]const u8 {
+pub fn recvNext(self: *WebSocket) !?[]const u8 {
     assert(self.is_open);
     if (self.reading_header and !try self.readHeader()) return null;
     if (self.read_i < self.end_i and !try self.recv(self.end_i)) return null;
@@ -50,24 +50,24 @@ pub fn recvNext(self: *Self) !?[]const u8 {
     return self.unmask();
 }
 
-pub fn isOpen(self: *Self) bool {
+pub fn isOpen(self: *WebSocket) bool {
     return self.is_open;
 }
 
 // type of last message returned by recvNext(); 'false' for text
-pub fn isBinary(self: *Self) bool {
+pub fn isBinary(self: *WebSocket) bool {
     return self.is_binary;
 }
 
-pub fn send(self: *Self, data: []const u8) !void {
+pub fn send(self: *WebSocket, data: []const u8) !void {
     return self.sendWithH0(data, 0x82);
 }
 
-pub fn sendText(self: *Self, data: []const u8) !void {
+pub fn sendText(self: *WebSocket, data: []const u8) !void {
     return self.sendWithH0(data, 0x81);
 }
 
-fn sendWithH0(self: *Self, data: []const u8, comptime h0: u8) !void {
+fn sendWithH0(self: *WebSocket, data: []const u8, comptime h0: u8) !void {
     const header: []const u8 = res: {
         if (data.len <= len7_max) break :res &[2]u8{ h0, @truncate(u8, data.len) };
 
@@ -80,7 +80,7 @@ fn sendWithH0(self: *Self, data: []const u8, comptime h0: u8) !void {
     _ = try os.send(self.fd, data, 0);
 }
 
-fn readHeader(self: *Self) !bool {
+fn readHeader(self: *WebSocket) !bool {
     // not meant to be transparent; refer to RFC 6455
     const header_i = self.end_i;
     if (self.read_i < header_i + 2 and !try self.recv(header_i + 2)) return false;
@@ -148,7 +148,7 @@ fn readHeader(self: *Self) !bool {
     return true;
 }
 
-fn postFrameCleanup(self: *Self) void {
+fn postFrameCleanup(self: *WebSocket) void {
     const max_header_len = 14;
     if (self.end_i == self.read_i) {
         self.end_i = 0;
@@ -161,7 +161,7 @@ fn postFrameCleanup(self: *Self) void {
     self.reading_header = true;
 }
 
-fn unmask(self: *Self) []u8 {
+fn unmask(self: *WebSocket) []u8 {
     var res = self.buf[self.start_i..self.end_i];
     if (self.end_i - self.start_i < 32) {
         for (res) |*v, i|
@@ -185,7 +185,7 @@ fn unmask(self: *Self) []u8 {
     return res;
 }
 
-fn recv(self: *Self, min_read_i: usize) !bool {
+fn recv(self: *WebSocket, min_read_i: usize) !bool {
     assert(min_read_i > self.read_i and min_read_i <= self.buf.len);
     const max_read_i = @min(min_read_i + 0x100, self.buf.len); // limit size of potential data move
     const n = os.recv(self.fd, self.buf[self.read_i..max_read_i], os.linux.MSG.DONTWAIT) catch |err| return if (err == os.RecvFromError.WouldBlock) false else err;
@@ -198,7 +198,7 @@ fn recv(self: *Self, min_read_i: usize) !bool {
     return self.read_i >= min_read_i;
 }
 
-fn close(self: *Self, status: CloseStatus) !void {
+fn close(self: *WebSocket, status: CloseStatus) !void {
     try self.sendClose(status);
     self.is_open = false;
     try os.shutdown(self.fd, .send);
@@ -206,7 +206,7 @@ fn close(self: *Self, status: CloseStatus) !void {
     os.close(self.fd);
 }
 
-fn sendClose(self: *const Self, status: CloseStatus) !void {
+fn sendClose(self: *const WebSocket, status: CloseStatus) !void {
     const status_val = @enumToInt(status);
     const frame = [4]u8{ 0x88, 0x02, @truncate(u8, status_val >> 8), @truncate(u8, status_val) };
     _ = try os.send(self.fd, &frame, 0);
