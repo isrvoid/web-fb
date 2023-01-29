@@ -9,7 +9,7 @@ pub fn build(b: *std.build.Builder) void {
     exe.setBuildMode(mode);
     exe.install();
 
-    const wasm_lib = b.addSharedLibrary("webfb", "src/webfb_wasm.zig", .unversioned);
+    const wasm_lib = b.addSharedLibrary("webfb", "src/webfb_stub.zig", .unversioned);
     const wasm_target = std.zig.CrossTarget.parse(.{ .arch_os_abi = "wasm32-freestanding" }) catch unreachable;
     wasm_lib.setTarget(wasm_target);
     wasm_lib.setBuildMode(.ReleaseFast);

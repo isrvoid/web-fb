@@ -62,7 +62,7 @@ var debug_log = DebugLog{};
 pub fn main() !void {
     const sfd = try initSocket(8080);
     defer os.close(sfd);
-    try debug_log.init("/tmp/requestLog.txt");
+    try debug_log.init("/tmp/webfb_request_log.txt");
     defer debug_log.deinit();
     var request_buf: [0x400]u8 = undefined;
     outer: while (true) {
@@ -102,10 +102,11 @@ fn handOverWsConnection(socket: socket_t) void {
     // FIXME push the socket somewhere else and return; this is just for debugging
     var buf: [0x1000]u8 = undefined;
     var ws = @import("WebSocket.zig").init(socket, &buf);
-    while (ws.is_open) {
+    while (ws.isOpen()) {
         // FIXME
         while (ws.recvNext() catch unreachable) |msg| {
-            _ = msg;
+            if (!ws.isBinary())
+                ws.sendText(msg) catch unreachable;
         }
         std.time.sleep(1e6);
     }
@@ -352,7 +353,7 @@ const ContentType = enum {
 };
 
 fn sendFile(socket: socket_t, file: std.fs.File, len: usize) !void {
-    var buf: [1 << 12]u8 = undefined;
+    var buf: [0x1000]u8 = undefined;
     var file_i: usize = 0;
     while (file_i < len) {
         const buf_i = try file.read(&buf);
