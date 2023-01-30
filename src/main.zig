@@ -62,7 +62,7 @@ var debug_log = DebugLog{};
 pub fn main() !void {
     const sfd = try initSocket(8080);
     defer os.close(sfd);
-    try debug_log.init("/tmp/webfb_request_log.txt");
+    try debug_log.init("/tmp/webfb_debug_log.txt");
     defer debug_log.deinit();
     var request_buf: [0x400]u8 = undefined;
     outer: while (true) {

@@ -16,6 +16,22 @@ const canvas = document.getElementById("canvas");
 canvas.width = webfb.imageWidth();
 canvas.height = webfb.imageHeight();
 
+canvas.addEventListener("mousemove", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    webfb.setInputPosition(x, y);
+});
+canvas.addEventListener("mousedown", (e) => {
+    if (e.button == 0)
+        webfb.setInputPressed(true);
+});
+canvas.addEventListener("mouseup", (e) => {
+    if (e.button == 0)
+        webfb.setInputPressed(false);
+});
+canvas.addEventListener("mouseleave", (e) => { webfb.setInputPressed(false); });
+
 const frameBuffer = new Uint8ClampedArray(webfb.memory.buffer, webfb.bufferAddress(), webfb.bufferSize());
 const imageData = new ImageData(frameBuffer, webfb.imageWidth(), webfb.imageHeight());
 const ctx = canvas.getContext("bitmaprenderer");

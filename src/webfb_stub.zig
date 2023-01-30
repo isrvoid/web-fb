@@ -49,3 +49,6 @@ var buf_change_idx: u32 = 0;
 export fn popShouldDraw() bool {
     return true;
 }
+
+export fn setInputPosition(_: i32, _: i32) void {}
+export fn setInputPressed(_: bool) void {}
