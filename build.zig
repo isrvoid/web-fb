@@ -21,8 +21,6 @@ pub fn build(b: *std.build.Builder) void {
     });
     wasm_lib.rdynamic = true;
     wasm_lib.strip = true;
-    const wasm_page_size = 1 << 16;
-    wasm_lib.global_base = 8 * wasm_page_size;
     wasm_lib.override_dest_dir = .{ .custom = "../web-root" };
     wasm_lib.install();
 

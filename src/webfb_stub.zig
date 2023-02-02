@@ -1,23 +1,16 @@
 const std = @import("std");
 
-const buffer = @intToPtr([*]align(4) u8, buffer_adr);
-
 export fn init() void {
-    const num_pages_required = (buffer_adr + bufferSize()) / std.mem.page_size + 1;
-    const num_pages = @wasmMemorySize(0);
-    if (num_pages < num_pages_required)
-        if (@wasmMemoryGrow(0, num_pages_required - num_pages) == -1)
-            @panic("Failed to increase memory");
-
+    frame_buf = std.heap.page_allocator.alloc(u32, image_width * image_height) catch unreachable;
     fill(0xff000000);
 }
 
-const buffer_adr = std.mem.page_size * 16; // global_base set to page 8 in build.zig
+var frame_buf: []u32 = undefined;
 const image_width = 800;
 const image_height = 480;
 
 export fn bufferAddress() u32 {
-    return buffer_adr;
+    return @intCast(u32, @ptrToInt(frame_buf.ptr));
 }
 
 export fn bufferSize() u32 {
@@ -33,8 +26,7 @@ export fn imageHeight() u32 {
 }
 
 fn fill(v: u32) void {
-    const buf = @ptrCast([*]u32, buffer)[0 .. image_width * image_height];
-    for (buf) |*e|
+    for (frame_buf) |*e|
         e.* = v;
 }
 
