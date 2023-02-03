@@ -44,3 +44,5 @@ export fn popShouldDraw() bool {
 
 export fn setInputPosition(_: i32, _: i32) void {}
 export fn setInputPressed(_: bool) void {}
+export fn setWheelDelta(_: i32) void {}
+export fn setWheelPressed(_: bool) void {}
