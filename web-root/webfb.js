@@ -1,10 +1,12 @@
 const webfbBinding = {
     env: {
         js_log_int: (a) => { console.log(`debug: ${a}`); },
-        js_assert_failure: (filenameAddr, filenameLen, line) => {
-            const rawFilename = new Uint8Array(webfb.memory.buffer, filenameAddr, filenameLen);
-            const filename = new TextDecoder().decode(rawFilename);
-            console.assert(false, filename, ":", line);
+        js_assert_fail: (exprAdr, exprLen, fileAdr, fileLen, line, funcAdr, funcLen) => {
+            const dec = new TextDecoder();
+            const expr = dec.decode(new Uint8Array(webfb.memory.buffer, exprAdr, exprLen));
+            const file = dec.decode(new Uint8Array(webfb.memory.buffer, fileAdr, fileLen));
+            const func = dec.decode(new Uint8Array(webfb.memory.buffer, funcAdr, funcLen));
+            console.assert(false, `${file}:${line}: ${func}: Assertion '${expr}' failed.`);
         },
     }
 };
