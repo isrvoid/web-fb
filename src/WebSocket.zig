@@ -119,7 +119,7 @@ fn readHeader(self: *WebSocket) !bool {
         var lb = LenBytes{ .val = 0 };
         const ext_len_bytes = self.buf[header_i + 2 .. header_i + 2 + num_ext_bytes];
         if (comptime @import("builtin").cpu.arch.endian() == .Little) {
-            for (ext_len_bytes) |v, i|
+            for (ext_len_bytes, 0..) |v, i|
                 lb.a[num_ext_bytes - 1 - i] = v;
         } else { // big endian
             mem.copy(u8, lb.a[8 - num_ext_bytes .. 8], ext_len_bytes);
@@ -168,7 +168,7 @@ fn postFrameCleanup(self: *WebSocket) void {
 fn unmask(self: *WebSocket) []u8 {
     var res = self.buf[self.start_i..self.end_i];
     if (self.end_i - self.start_i < 32) {
-        for (res) |*v, i|
+        for (res, 0..) |*v, i|
             v.* ^= self.mkey[i % 4];
     } else {
         const start = @ptrToInt(self.buf.ptr + self.start_i);
