@@ -59,6 +59,8 @@ const DebugLog = struct {
 
 request_buf: []u8,
 sfd: socket_t,
+cfd: socket_t = undefined,
+is_peer_connected: bool = false,
 
 const Server = @This();
 
@@ -68,38 +70,54 @@ pub fn init(port: u16, request_buf: []u8) !Server {
 }
 
 pub fn deinit(self: *Server) void {
+    if (self.is_peer_connected)
+        os.close(self.cfd);
     os.close(self.sfd);
     debug_log.deinit();
 }
 
 pub fn step(self: *Server) !?socket_t {
-    const cfd = try waitForConnection(self.sfd);
-    debug_log.logClientConnected();
-    while (true) {
-        const raw_request = try waitForRequest(cfd, self.request_buf);
-        debug_log.logRecv(if (raw_request.len > 0) raw_request else "end-of-file (0 length)\n");
-        if (raw_request.len == 0) { // peer has closed
-            os.close(cfd);
+    if (!self.is_peer_connected) {
+        self.cfd = res: {
+            const fd = try maybeAcceptConnection(self.sfd);
+            if (fd == null) return null;
+            break :res fd.?;
+        };
+        debug_log.logClientConnected();
+        self.is_peer_connected = true;
+    }
+    const cfd = self.cfd;
+    const raw_request = res: {
+        const req = try maybeReceiveRequest(cfd, self.request_buf);
+        if (req == null) return null;
+        break :res req.?;
+    };
+    debug_log.logRecv(if (raw_request.len > 0) raw_request else "end-of-file (0 length)\n");
+    if (raw_request.len == 0) { // peer has closed
+        os.close(cfd);
+        self.is_peer_connected = false;
+        return null;
+    }
+    const request = res: {
+        const request_ = parseRequest(raw_request);
+        if (request_ == null) {
+            try sendErrorResponse(cfd, .bad_request);
             return null;
         }
-        const request = res: {
-            const request_ = parseRequest(raw_request);
-            if (request_ == null) {
-                try sendErrorResponse(cfd, .bad_request);
-                continue;
-            }
-            break :res request_.?;
-        };
-        switch (request.method) {
-            .GET => {
-                if (request.is_upgrade_request) {
-                    if (try handleUpgradeRequest(cfd, request.raw_websocket_key.?))
-                        return cfd;
-                } else try handleGetFileRequest(cfd, request);
-            },
-            else => try sendErrorResponse(cfd, .not_implemented),
-        }
+        break :res request_.?;
+    };
+    switch (request.method) {
+        .GET => {
+            if (request.is_upgrade_request) {
+                if (try handleUpgradeRequest(cfd, request.raw_websocket_key.?)) {
+                    self.is_peer_connected = false;
+                    return cfd;
+                }
+            } else try handleGetFileRequest(cfd, request);
+        },
+        else => try sendErrorResponse(cfd, .not_implemented),
     }
+    return null;
 }
 
 fn handleGetFileRequest(socket: socket_t, request: Request) !void {
@@ -144,17 +162,18 @@ fn initSocket(port: u16) !socket_t {
     return sfd;
 }
 
-fn waitForConnection(sfd: socket_t) !socket_t {
+fn maybeAcceptConnection(sfd: socket_t) !?socket_t {
     var peer_address: IpAddress = undefined;
     var peer_address_size: os.socklen_t = @sizeOf(IpAddress);
-    const cfd = try os.accept(sfd, @ptrCast(*os.sockaddr, &peer_address), &peer_address_size, os.SOCK.CLOEXEC);
+    const cfd = os.accept(sfd, @ptrCast(*os.sockaddr, &peer_address), &peer_address_size, os.SOCK.NONBLOCK) catch |err|
+        return if (err == error.WouldBlock) null else err;
     if (peer_address_size != @sizeOf(IpAddress)) return error.PeerAddressSize;
     logAddress("peer connected: {s}", &peer_address);
     return cfd;
 }
 
-fn waitForRequest(socket: socket_t, buf: []u8) ![]u8 {
-    const n = try os.recv(socket, buf, 0);
+fn maybeReceiveRequest(socket: socket_t, buf: []u8) !?[]u8 {
+    const n = os.recv(socket, buf, 0) catch |err| return if (err == error.WouldBlock) null else err;
     if (n == buf.len) return error.BufferFull;
     return buf[0..n];
 }
