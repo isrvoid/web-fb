@@ -30,5 +30,6 @@ fn echoAndClose(socket: std.os.socket_t) !void {
         std.time.sleep(1e6);
     }
     if (ws.isOpen())
-        try ws.close();
+        while (!try ws.closeStep())
+            std.time.sleep(1e6);
 }
