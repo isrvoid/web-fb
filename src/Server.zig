@@ -4,6 +4,8 @@ const os = std.os;
 const IpAddress = std.net.Ip4Address;
 const socket_t = std.os.socket_t;
 
+const Content = @import("content.zig").Content;
+
 var debug_log = DebugLog{};
 
 const DebugLog = struct {
@@ -61,12 +63,13 @@ request_buf: []u8,
 sfd: socket_t,
 cfd: socket_t = undefined,
 is_peer_connected: bool = false,
+content: Content,
 
 const Server = @This();
 
-pub fn init(port: u16, request_buf: []u8) !Server {
+pub fn init(port: u16, content: Content, request_buf: []u8) !Server {
     try debug_log.init("/tmp/webfb_debug_log.txt");
-    return Server{ .sfd = try initSocket(port), .request_buf = request_buf };
+    return Server{ .sfd = try initSocket(port), .content = content, .request_buf = request_buf };
 }
 
 pub fn deinit(self: *Server) void {
@@ -98,43 +101,41 @@ pub fn step(self: *Server) !?socket_t {
         self.is_peer_connected = false;
         return null;
     }
-    const request = res: {
-        const request_ = parseRequest(raw_request);
-        if (request_ == null) {
-            try sendErrorResponse(cfd, .bad_request);
-            return null;
-        }
-        break :res request_.?;
+    const request = parseRequest(raw_request) catch {
+        try sendErrorResponse(cfd, .bad_request);
+        return null;
     };
     switch (request.method) {
         .GET => {
             if (request.is_upgrade_request) {
-                if (try handleUpgradeRequest(cfd, request.raw_websocket_key.?)) {
+                if (try handleUpgradeRequest(cfd, request.websocket_key.?)) {
                     self.is_peer_connected = false;
                     return cfd;
                 }
-            } else try handleGetFileRequest(cfd, request);
+            } else try handleFileRequest(cfd, request, self.content);
         },
         else => try sendErrorResponse(cfd, .not_implemented),
     }
     return null;
 }
 
-fn handleGetFileRequest(socket: socket_t, request: Request) !void {
+fn handleFileRequest(socket: socket_t, request: Request, content: Content) !void {
     const close_after = ".wasm"; // last file before expected upgrade request
-    var path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-    const is_default_target = request.raw_target.len == 1 and request.raw_target[0] == '/';
-    const path_ = sanitizedPath(if (is_default_target) "/index.html" else request.raw_target, &path_buf);
-    if (path_) |path| {
-        const should_close = mem.endsWith(u8, path, close_after);
-        try sendFileResponse(socket, path, should_close);
-    } else try sendErrorResponse(socket, .not_found);
+    var url_buf: [0x400]u8 = undefined;
+    const path = res: {
+        const url = try sanitizeUrl(request.url, &url_buf);
+        const is_default_url = url.len == 0;
+        break :res if (is_default_url) "index.html" else url;
+    };
+    const should_close = mem.endsWith(u8, path, close_after);
+    sendFileResponse(socket, content, path, should_close) catch |err|
+        if (err == error.FileNotFound) try sendErrorResponse(socket, .not_found) else return err;
 }
 
-fn handleUpgradeRequest(socket: socket_t, raw_key: []const u8) !bool {
+fn handleUpgradeRequest(socket: socket_t, ws_key: []const u8) !bool {
     const fixed_append = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     var sha = std.crypto.hash.Sha1.init(.{});
-    sha.update(raw_key);
+    sha.update(ws_key);
     sha.update(fixed_append);
     var hash: [20]u8 = undefined;
     sha.final(&hash);
@@ -180,51 +181,52 @@ fn maybeReceiveRequest(socket: socket_t, buf: []u8) !?[]u8 {
 
 const Request = struct {
     method: std.http.Method,
-    raw_target: []const u8,
+    url: []const u8,
     is_upgrade_request: bool,
-    raw_websocket_key: ?[]const u8,
+    websocket_key: ?[]const u8,
 };
 
-fn parseRequest(content: []const u8) ?Request {
+fn parseRequest(a: []const u8) !Request {
     var result: Request = undefined;
-    var line_it = HeaderLineIterator{.request = content};
-    const request_line = line_it.next() orelse return null;
-    if (!parseRequestLine(request_line, &result)) return null;
-    if (!parseUpgradeFields(line_it, &result)) return null;
+    var line_it = HeaderLineIterator{ .request = a };
+    const request_line = line_it.next().?; // FIXME receive end of the header in step()
+    try parseRequestLine(request_line, &result);
+    try parseUpgradeFields(line_it, &result);
     return result;
 }
 
-fn parseRequestLine(line: []const u8, result_out: *Request) bool {
-    const method_end_i = mem.indexOfScalar(u8, line, ' ') orelse return false;
-    const target_end_i = mem.lastIndexOfScalar(u8, line, ' ').?;
-    if (!mem.eql(u8, "HTTP/1.1", line[target_end_i + 1 ..])) return false;
+fn parseRequestLine(line: []const u8, out: *Request) !void {
+    const method_end_i = mem.indexOfScalar(u8, line, ' ') orelse return error.RequestLine;
+    const url_end_i = mem.lastIndexOfScalar(u8, line, ' ').?;
+    const url_start_i = method_end_i + 1;
+    if (url_start_i >= url_end_i) return error.RequestLineUrl;
+    out.url = line[url_start_i..url_end_i];
 
-    result_out.method = res: {
+    const http_start_i = url_end_i + 1;
+    if (!mem.eql(u8, "HTTP/1.1", line[http_start_i..])) return error.RequestLineHttp;
+
+    out.method = res: {
         const token = line[0..method_end_i];
         inline for (@typeInfo(std.http.Method).Enum.fields) |field|
             if (mem.eql(u8, token, field.name))
                 break :res @intToEnum(std.http.Method, field.value);
-        return false;
+        return error.RequestLineMethod;
     };
-    result_out.raw_target = line[method_end_i + 1 .. target_end_i];
-    return true;
 }
 
-fn parseUpgradeFields(fields_start: HeaderLineIterator, result_out: *Request) bool {
-    result_out.is_upgrade_request = false;
-    result_out.raw_websocket_key = null;
+fn parseUpgradeFields(fields_start: HeaderLineIterator, out: *Request) !void {
+    out.is_upgrade_request = false;
+    out.websocket_key = null;
     var it = fields_start;
-    var line_ = it.next();
-    while (line_ != null) : (line_ = it.next()) {
-        const line = line_.?;
+    while (it.next()) |line| {
         if (isUpgradeField(line))
-            result_out.is_upgrade_request = true;
+            out.is_upgrade_request = true;
 
         var key: []const u8 = undefined;
         if (isWebsocketKeyField(line, &key))
-            result_out.raw_websocket_key = key;
+            out.websocket_key = key;
     }
-    return result_out.is_upgrade_request == (result_out.raw_websocket_key != null);
+    if (out.is_upgrade_request != (out.websocket_key != null)) return error.UpgradeRequestFields;
 }
 
 fn isUpgradeField(line: []const u8) bool {
@@ -233,7 +235,7 @@ fn isUpgradeField(line: []const u8) bool {
     const min_len = name.len + val.len;
     if (line.len < min_len) return false;
     if (!std.ascii.eqlIgnoreCase(name, line[0..name.len])) return false;
-    return mem.eql(u8, val, mem.trim(u8, line[name.len..], &std.ascii.whitespace));
+    return mem.eql(u8, val, trim(line[name.len..]));
 }
 
 fn isWebsocketKeyField(line: []const u8, key_out: *[]const u8) bool {
@@ -242,9 +244,12 @@ fn isWebsocketKeyField(line: []const u8, key_out: *[]const u8) bool {
     if (line.len < min_len) return false;
     if (std.ascii.toLower(line[16]) != 'y') return false; // discard same prefix quicker
     if (!std.ascii.eqlIgnoreCase(name, line[0..name.len])) return false;
-    const val = mem.trim(u8, line[name.len..], &std.ascii.whitespace);
-    key_out.* = val;
-    return val.len > 0;
+    key_out.* = trim(line[name.len..]);
+    return key_out.len > 0;
+}
+
+inline fn trim(s: []const u8) []const u8 {
+    return mem.trim(u8, s, &std.ascii.whitespace);
 }
 
 const HeaderLineIterator = struct {
@@ -334,45 +339,19 @@ fn writeErrorResponse(comptime stat: std.http.Status, buf: []u8) []u8 {
     return stream.getWritten();
 }
 
-fn sendFileResponse(socket: socket_t, path: []const u8, close_connection: bool) !void {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    const content_len = @intCast(usize, try file.getEndPos());
+fn sendFileResponse(socket: socket_t, content: Content, path: []const u8, close_connection: bool) !void {
+    const prop = try content.open(path);
+    defer content.close();
     var header_buf: [0x100]u8 = undefined;
-    const header = writeHeader(content_len, contentType(path), close_connection, &header_buf);
+    const header = writeHeader(prop.len, prop.cont_type, close_connection, &header_buf);
     _ = try os.send(socket, header, 0);
-    try sendFile(socket, file, content_len);
+    var chunk = try content.nextChunk();
+    while (chunk.len != 0) : (chunk = try content.nextChunk())
+        _ = try os.send(socket, chunk, 0);
     debug_log.logSendFile(header, path);
 }
 
-fn contentType(path: []const u8) ContentType {
-    if (mem.endsWith(u8, path, ".html")) return .html;
-    if (mem.endsWith(u8, path, ".js")) return .javascript;
-    if (mem.endsWith(u8, path, ".wasm")) return .webassembly;
-    if (mem.endsWith(u8, path, ".txt")) return .text;
-    return .binary;
-}
-
-const ContentType = enum {
-    html,
-    javascript,
-    webassembly,
-    text,
-    binary,
-};
-
-fn sendFile(socket: socket_t, file: std.fs.File, len: usize) !void {
-    var buf: [0x1000]u8 = undefined;
-    var file_i: usize = 0;
-    while (file_i < len) {
-        const buf_i = try file.read(&buf);
-        file_i += buf_i;
-        if (buf_i == 0) return error.FileTruncated; // file changed during response (shouldn't happen)
-        _ = try os.send(socket, buf[0..buf_i], 0);
-    }
-}
-
-fn writeHeader(content_len: usize, content_type: ContentType, close_connection: bool, buf: []u8) []u8 {
+fn writeHeader(content_len: usize, content_type: Content.Type, close_connection: bool, buf: []u8) []u8 {
     const fmt = "HTTP/1.1 " ++ statusString(.ok) ++ "\r\nContent-Type: {s}\r\nConnection: {s}\r\n"
         ++ "Content-Length: {d}\r\n\r\n";
     const sType = switch (content_type) {
@@ -388,20 +367,8 @@ fn writeHeader(content_len: usize, content_type: ContentType, close_connection: 
     return stream.getWritten();
 }
 
-const web_root = "web-root/";
-
-fn sanitizedPath(raw: []const u8, result_buf: *[std.fs.MAX_PATH_BYTES]u8) ?[]u8 {
-    if (raw.len == 0 or raw[0] != '/') return null;
-    // target starts with '/', otherwise relative() could return ".." and escape web_root directory
-    std.debug.assert(raw[0] == '/');
-    var sanitized_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-    const sanitized = res: {
-        var fba = std.heap.FixedBufferAllocator.init(sanitized_buf[web_root.len..]);
-        var s = std.fs.path.relative(fba.allocator(), "/", raw) catch unreachable;
-        s.ptr -= web_root.len;
-        s.len += web_root.len;
-        s[0..web_root.len].* = web_root.*;
-        break :res s;
-    };
-    return std.fs.realpath(sanitized, result_buf) catch null;
+// sanitized URL has no ".." (can't escape); leading '/' is omitted
+fn sanitizeUrl(url: []const u8, buf: []u8) ![]const u8 {
+    var fba = std.heap.FixedBufferAllocator.init(buf);
+    return (try std.fs.path.resolvePosix(fba.allocator(), &[2][]const u8{ "/", url }))[1..];
 }

@@ -4,7 +4,8 @@ const Server = @import("Server.zig");
 
 pub fn main() !void {
     var request_buf: [0x400]u8 = undefined;
-    var server = try Server.init(8080, &request_buf);
+    var dir_cont = @import("content.zig").DirContent{ .dir = "web-root" };
+    var server = try Server.init(8080, dir_cont.content(), &request_buf);
     defer server.deinit();
     while (true) {
         const res = try server.step();
@@ -32,4 +33,8 @@ fn echoAndClose(socket: std.os.socket_t) !void {
     if (ws.isOpen())
         while (!try ws.closeStep())
             std.time.sleep(1e6);
+}
+
+test "force inclusion" {
+    _ = Server;
 }
