@@ -89,3 +89,49 @@ pub const DirContent = struct {
         return .binary;
     }
 };
+
+pub const ListContent = struct {
+    entries: []const Entry,
+    read_i: usize = undefined,
+    current: []const u8 = undefined,
+
+    pub const Entry = struct {
+        name: []const u8,
+        cont: []const u8,
+        cont_type: Content.Type,
+    };
+    const max_chunk_size = 0x1000;
+    const Self = @This();
+
+    pub fn content(self: *Self) Content {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .open = open,
+                .close = close,
+                .nextChunk = nextChunk,
+            },
+        };
+    }
+
+    pub fn open(ctx: *anyopaque, name: []const u8) !Content.Properties {
+        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ctx));
+        for (self.entries) |e| {
+            if (std.mem.eql(u8, name, e.name)) {
+                self.read_i = 0;
+                self.current = e.cont;
+                return .{ .cont_type = e.cont_type, .len = e.cont.len };
+            }
+        }
+        return error.FileNotFound;
+    }
+
+    pub fn close(_: *anyopaque) void {}
+
+    pub fn nextChunk(ctx: *anyopaque) ![]const u8 {
+        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ctx));
+        const chunk_end = @min(self.read_i + max_chunk_size, self.current.len);
+        defer self.read_i = chunk_end;
+        return self.current[self.read_i..chunk_end];
+    }
+};
