@@ -9,7 +9,7 @@ export fn initTempPage() void {
 }
 
 export fn tempPageAdr() u32 {
-    return @ptrToInt(temp_page);
+    return @intFromPtr(temp_page);
 }
 var temp_page: *[page_size]u8 = undefined;
 
@@ -25,12 +25,12 @@ var recv_buf: *[page_size]u8 = undefined;
 var send_buf: *[page_size]u8 = undefined;
 
 export fn writeBufferAdrLen() i32 {
-    const p = @ptrCast(*[6]u32, @alignCast(4, temp_page));
-    p[0] = @ptrToInt(frame_buf.ptr);
+    const p: *[6]u32 = @ptrCast(@alignCast(temp_page));
+    p[0] = @intFromPtr(frame_buf.ptr);
     p[1] = frame_width * frame_height * 4;
-    p[2] = @ptrToInt(recv_buf);
+    p[2] = @intFromPtr(recv_buf);
     p[3] = recv_buf.len;
-    p[4] = @ptrToInt(send_buf);
+    p[4] = @intFromPtr(send_buf);
     p[5] = send_buf.len;
     return p.len;
 }

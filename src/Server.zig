@@ -157,7 +157,7 @@ fn sendUpgradeResponse(socket: socket_t, hash_str: []const u8) !void {
 fn initSocket(port: u16) !socket_t {
     const sfd = try os.socket(os.AF.INET, os.SOCK.STREAM | os.SOCK.CLOEXEC, 0);
     const address = IpAddress.init(.{ 0, 0, 0, 0 }, port);
-    try os.bind(sfd, @ptrCast(*const os.sockaddr, &address), @sizeOf(IpAddress));
+    try os.bind(sfd, @ptrCast(&address), @sizeOf(IpAddress));
     const backlog = 10;
     try os.listen(sfd, backlog);
     return sfd;
@@ -166,7 +166,7 @@ fn initSocket(port: u16) !socket_t {
 fn maybeAcceptConnection(sfd: socket_t) !?socket_t {
     var peer_address: IpAddress = undefined;
     var peer_address_size: os.socklen_t = @sizeOf(IpAddress);
-    const cfd = os.accept(sfd, @ptrCast(*os.sockaddr, &peer_address), &peer_address_size, os.SOCK.NONBLOCK) catch |err|
+    const cfd = os.accept(sfd, @ptrCast(&peer_address), &peer_address_size, os.SOCK.NONBLOCK) catch |err|
         return if (err == error.WouldBlock) null else err;
     if (peer_address_size != @sizeOf(IpAddress)) return error.PeerAddressSize;
     logAddress("peer connected: {s}", &peer_address);
@@ -209,7 +209,7 @@ fn parseRequestLine(line: []const u8, out: *Request) !void {
         const token = line[0..method_end_i];
         inline for (@typeInfo(std.http.Method).Enum.fields) |field|
             if (mem.eql(u8, token, field.name))
-                break :res @intToEnum(std.http.Method, field.value);
+                break :res @enumFromInt(field.value);
         return error.RequestLineMethod;
     };
 }
@@ -269,9 +269,9 @@ const HeaderLineIterator = struct {
     fn indexOfHeaderLineEnding(s: []const u8) ?usize {
         var p = s.ptr;
         const p_end = s.ptr + s.len - 1;
-        while (@ptrToInt(p) < @ptrToInt(p_end)) : (p += 1)
+        while (@intFromPtr(p) < @intFromPtr(p_end)) : (p += 1)
             if (p[0] == '\r' and p[1] == '\n')
-                return @ptrToInt(p) - @ptrToInt(s.ptr);
+                return @intFromPtr(p) - @intFromPtr(s.ptr);
 
         return null;
     }
@@ -323,7 +323,7 @@ fn logAddress(comptime fmt: []const u8, addr: *const IpAddress) void {
 }
 
 inline fn statusString(comptime status: std.http.Status) [:0]const u8 {
-    comptime return std.fmt.comptimePrint("{d} {s}", .{ @enumToInt(status), status.phrase().? })[0..];
+    comptime return std.fmt.comptimePrint("{d} {s}", .{ @intFromEnum(status), status.phrase().? })[0..];
 }
 
 fn writeErrorResponse(comptime stat: std.http.Status, buf: []u8) []u8 {

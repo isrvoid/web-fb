@@ -83,7 +83,7 @@ pub fn closeStep(self: *WebSocket) !bool {
 
 fn sendWithH0(self: *WebSocket, data: []const u8, comptime h0: u8) !void {
     const header: []const u8 = res: {
-        if (data.len <= len7_max) break :res &[2]u8{ h0, @truncate(u8, data.len) };
+        if (data.len <= len7_max) break :res &[2]u8{ h0, @as(u8, @truncate(data.len)) };
 
         const len = LenBytes{ .val = mem.nativeToBig(u64, data.len) };
         if (data.len < 1 << 16) break :res &[2]u8{ h0, 0x7e } ++ len.a[6..8];
@@ -109,7 +109,7 @@ fn readHeader(self: *WebSocket) !bool {
         return false;
     }
     const len7 = h1 & 0x7f;
-    const num_ext_bytes = @as(u32, @boolToInt(len7 == 0x7e)) * 2 + @as(u32, @boolToInt(len7 == 0x7f)) * 8;
+    const num_ext_bytes = @as(u32, @intFromBool(len7 == 0x7e)) * 2 + @as(u32, @intFromBool(len7 == 0x7f)) * 8;
     const header_len = 2 + num_ext_bytes + 4;
     if (self.read_i < header_i + header_len and !try self.recv(header_i + header_len)) return false;
     // not supported (non spec compliant): fragmented messages, ping, pong
@@ -143,7 +143,7 @@ fn readHeader(self: *WebSocket) !bool {
             try self.beginCloseWithStatus(close_status);
             return false;
         }
-        break :res @truncate(usize, len);
+        break :res @truncate(len);
     };
 
     const header_end_i = header_i + header_len;
@@ -181,20 +181,20 @@ fn unmask(self: *WebSocket) []u8 {
         for (res, 0..) |*v, i|
             v.* ^= self.mkey[i % 4];
     } else {
-        const start = @ptrToInt(self.buf.ptr + self.start_i);
-        const end = @ptrToInt(self.buf.ptr + self.end_i);
+        const start = @intFromPtr(self.buf.ptr + self.start_i);
+        const end = @intFromPtr(self.buf.ptr + self.end_i);
         const aligned_end = end & ~@as(usize, 3);
         const past_aligned = start % 4;
-        const al_inc = @as(usize, @boolToInt(past_aligned != 0)) * 4 - past_aligned;
+        const al_inc = @as(usize, @intFromBool(past_aligned != 0)) * 4 - past_aligned;
         const aligned_start = start + al_inc;
         const key = ValBytes(u32){ .a = .{ self.mkey[al_inc], self.mkey[al_inc+1 & 3], self.mkey[al_inc+2 & 3], self.mkey[al_inc+3 & 3] } };
         var i = start;
         while (i < aligned_start) : (i += 1)
-            @intToPtr(*u8, i).* ^= key.a[i % 4];
+            @as(*u8, @ptrFromInt(i)).* ^= key.a[i % 4];
         while (i < aligned_end) : (i += 4)
-            @intToPtr(*u32, i).* ^= key.val;
+            @as(*u32, @ptrFromInt(i)).* ^= key.val;
         while (i < end) : (i += 1)
-            @intToPtr(*u8, i).* ^= key.a[i % 4];
+            @as(*u8, @ptrFromInt(i)).* ^= key.a[i % 4];
     }
     return res;
 }
@@ -220,7 +220,7 @@ fn beginCloseWithStatus(self: *WebSocket, status: CloseStatus) !void {
 }
 
 fn sendClose(self: *const WebSocket, status: CloseStatus) !void {
-    const status_val = @enumToInt(status);
-    const frame = [4]u8{ 0x88, 0x02, @truncate(u8, status_val >> 8), @truncate(u8, status_val) };
+    const status_val = @intFromEnum(status);
+    const frame = [4]u8{ 0x88, 0x02, @truncate(status_val >> 8), @truncate(status_val) };
     _ = try os.send(self.fd, &frame, 0);
 }

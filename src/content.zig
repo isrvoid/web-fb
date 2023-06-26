@@ -56,26 +56,26 @@ pub const DirContent = struct {
     }
 
     pub fn open(ctx: *anyopaque, sub_path: []const u8) !Content.Properties {
-        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ctx));
+        const self: *Self = @ptrCast(@alignCast(ctx));
         std.debug.assert(!self.is_open);
         var path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&path_buf);
         const path = try std.fs.path.join(fba.allocator(), &[2][]const u8{ self.dir, sub_path });
         self.file = try std.fs.cwd().openFile(path, .{});
-        const len = @intCast(usize, try self.file.getEndPos());
+        const len: usize = @intCast(try self.file.getEndPos());
         self.is_open = true;
         return .{ .cont_type = contentType(path), .len = len };
     }
 
     pub fn close(ctx: *anyopaque) void {
-        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ctx));
+        const self: *Self = @ptrCast(@alignCast(ctx));
         std.debug.assert(self.is_open);
         self.file.close();
         self.is_open = false;
     }
 
     pub fn nextChunk(ctx: *anyopaque) ![]const u8 {
-        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ctx));
+        const self: *Self = @ptrCast(@alignCast(ctx));
         const n = try self.file.read(&self.buf);
         return self.buf[0..n];
     }
@@ -115,7 +115,7 @@ pub const ListContent = struct {
     }
 
     pub fn open(ctx: *anyopaque, name: []const u8) !Content.Properties {
-        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ctx));
+        const self: *Self = @ptrCast(@alignCast(ctx));
         for (self.entries) |e| {
             if (std.mem.eql(u8, name, e.name)) {
                 self.read_i = 0;
@@ -129,7 +129,7 @@ pub const ListContent = struct {
     pub fn close(_: *anyopaque) void {}
 
     pub fn nextChunk(ctx: *anyopaque) ![]const u8 {
-        const self = @ptrCast(*Self, @alignCast(@alignOf(Self), ctx));
+        const self: *Self = @ptrCast(@alignCast(ctx));
         const chunk_end = @min(self.read_i + max_chunk_size, self.current.len);
         defer self.read_i = chunk_end;
         return self.current[self.read_i..chunk_end];
