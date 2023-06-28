@@ -81,20 +81,12 @@ pub fn deinit(self: *Server) void {
 
 pub fn step(self: *Server) !?socket_t {
     if (!self.is_peer_connected) {
-        self.cfd = res: {
-            const fd = try maybeAcceptConnection(self.sfd);
-            if (fd == null) return null;
-            break :res fd.?;
-        };
+        self.cfd = try maybeAcceptConnection(self.sfd) orelse return null;
         debug_log.logClientConnected();
         self.is_peer_connected = true;
     }
     const cfd = self.cfd;
-    const raw_request = res: {
-        const req = try maybeReceiveRequest(cfd, self.request_buf);
-        if (req == null) return null;
-        break :res req.?;
-    };
+    const raw_request = try maybeReceiveRequest(cfd, self.request_buf) orelse return null;
     debug_log.logRecv(if (raw_request.len > 0) raw_request else "end-of-file (0 length)\n");
     if (raw_request.len == 0) { // peer has closed
         os.close(cfd);
